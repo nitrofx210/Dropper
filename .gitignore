@@ -1,0 +1,7 @@
+# Upstream clones are tracked separately — do not commit them here.
+go-ethereum/
+simnet/
+ethp2p/
+# Temp / office lock files
+~$*.docx
+_testout.txt
