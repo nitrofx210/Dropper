@@ -1,0 +1,45 @@
+[
+{
+  "timestamp": "2026-09-05T15:48:08Z",
+  "node": "node1",
+  "container_name": "ethdropper_node1",
+  "ip_address": "172.30.0.11",
+  "enode": enode://83035ed44df6c256e0b24a53ec438b5c28b243ee80d4796e9a75c1958eae98c5a827d31c337603b10d13ae5a389ce08c121042636db2d5909f3195da1e038441@172.30.0.11:30303?discport=0,
+  "peer_count": "0",
+  "block_number": "0",
+  "peers_info": []
+}
+,
+{
+  "timestamp": "2026-09-05T15:48:09Z",
+  "node": "node2",
+  "container_name": "ethdropper_node2",
+  "ip_address": "172.30.0.12",
+  "enode": enode://1f2a5f08daa5415e56f69a8438c724285260d19db3ee37c0f57639d2c05c3b9ff9585edc0272dad57c655d911ac3dbe50b93543470bf855a69dfc913461e8b3c@172.30.0.12:30303?discport=0,
+  "peer_count": "0",
+  "block_number": "0",
+  "peers_info": []
+}
+,
+{
+  "timestamp": "2026-09-05T15:48:11Z",
+  "node": "node3",
+  "container_name": "ethdropper_node3",
+  "ip_address": "172.30.0.13",
+  "enode": enode://060f0700717e6427ae04ab1dab60f7b1c7bef598aef7ea77fd7b0236891536ad96d25c09407773f776a4bc00ea1099415bafabb0e9ce4440abd62209861db46d@172.30.0.13:30303?discport=0,
+  "peer_count": "0",
+  "block_number": "0",
+  "peers_info": []
+}
+,
+{
+  "timestamp": "2026-09-05T15:48:13Z",
+  "node": "node4",
+  "container_name": "ethdropper_node4",
+  "ip_address": "172.30.0.14",
+  "enode": enode://6a1c03a37b207111b37b74241892310d05d19349290e2eeb8d6c5e2f0a7d581e136be82e305175564d086fc141251930fd8fea416a906979aea03ae7c40f86f2@172.30.0.14:30303?discport=0,
+  "peer_count": "0",
+  "block_number": "0",
+  "peers_info": []
+}
+]

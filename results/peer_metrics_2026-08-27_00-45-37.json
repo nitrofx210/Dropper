@@ -1,0 +1,45 @@
+[
+{
+  "timestamp": "2026-08-26T19:15:38Z",
+  "node": "node1",
+  "container_name": "ethdropper_node1",
+  "ip_address": "172.30.0.11",
+  "enode": null,
+  "peer_count": "0x0",
+  "block_number": "0x0",
+  "peers_info": []
+}
+,
+{
+  "timestamp": "2026-08-26T19:15:39Z",
+  "node": "node2",
+  "container_name": "ethdropper_node2",
+  "ip_address": "172.30.0.12",
+  "enode": null,
+  "peer_count": "0x0",
+  "block_number": "0x0",
+  "peers_info": []
+}
+,
+{
+  "timestamp": "2026-08-26T19:15:41Z",
+  "node": "node3",
+  "container_name": "ethdropper_node3",
+  "ip_address": "172.30.0.13",
+  "enode": null,
+  "peer_count": "0x0",
+  "block_number": "0x0",
+  "peers_info": []
+}
+,
+{
+  "timestamp": "2026-08-26T19:15:42Z",
+  "node": "node4",
+  "container_name": "ethdropper_node4",
+  "ip_address": "172.30.0.14",
+  "enode": null,
+  "peer_count": "0x0",
+  "block_number": "0x0",
+  "peers_info": []
+}
+]
