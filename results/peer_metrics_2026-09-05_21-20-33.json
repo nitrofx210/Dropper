@@ -1,0 +1,327 @@
+[
+{
+  "timestamp": "2026-09-05T15:50:35Z",
+  "node": "node1",
+  "container_name": "ethdropper_node1",
+  "ip_address": "172.30.0.11",
+  "enode": enode://83035ed44df6c256e0b24a53ec438b5c28b243ee80d4796e9a75c1958eae98c5a827d31c337603b10d13ae5a389ce08c121042636db2d5909f3195da1e038441@172.30.0.11:30303,
+  "peer_count": "3",
+  "block_number": "0",
+  "peers_info": [{
+    caps: ["eth/69", "eth/70", "eth/71", "eth/72", "snap/1"],
+    enode: "enode://6a1c03a37b207111b37b74241892310d05d19349290e2eeb8d6c5e2f0a7d581e136be82e305175564d086fc141251930fd8fea416a906979aea03ae7c40f86f2@172.30.0.14:30303",
+    enr: "enr:-KO4QDZ9UWlUVNrPDDsHuE9ZMXK87Wni_44kV646pCC6LUwLeaS0n-iMWhz_-ORXGce4fsEUU0elQq9bs-JKc8H-j3KGAaA_iLz9g2V0aMfGhGfRmtaAgmlkgnY0gmlwhKweAA6Jc2VjcDI1NmsxoQJqHAOjeyBxEbN7dCQYkjENBdGTSSkOLuuNbF4vCn1YHoRzbmFwwIN0Y3CCdl-DdWRwgnZf",
+    id: "0997367c920554507b576095480e36719a18258bc59ec6b3ac9ea70b3767b096",
+    name: "Geth/v1.17.5-stable-9621c6ad/linux-amd64/go1.26.5",
+    network: {
+      inbound: false,
+      localAddress: "172.30.0.11:48290",
+      remoteAddress: "172.30.0.14:30303",
+      static: false,
+      trusted: false
+    },
+    protocols: {
+      eth: {
+        earliestBlock: 0,
+        latestBlock: 0,
+        latestBlockHash: "0x286c98003d8084cb7b4df842a47ec5b6b21c8330deac596f96d1e637a58dfa5b",
+        version: 72
+      },
+      snap: {
+        version: 1
+      }
+    }
+}, {
+    caps: ["eth/69", "eth/70", "eth/71", "eth/72", "snap/1"],
+    enode: "enode://1f2a5f08daa5415e56f69a8438c724285260d19db3ee37c0f57639d2c05c3b9ff9585edc0272dad57c655d911ac3dbe50b93543470bf855a69dfc913461e8b3c@172.30.0.12:30303",
+    enr: "enr:-KO4QFHiAsDbPgLEBNQ2-WToFVbmsOzJKm9y2AflZT3REbQ7PfKgw0qtUdDlXm_PDNA3qi_PBAnjxMEanVtMPpI2xAiGAaA_iLzug2V0aMfGhGfRmtaAgmlkgnY0gmlwhKweAAyJc2VjcDI1NmsxoQIfKl8I2qVBXlb2moQ4xyQoUmDRnbPuN8D1djnSwFw7n4RzbmFwwIN0Y3CCdl-DdWRwgnZf",
+    id: "a679c77e5910d537931b6cb22dc264ddee299308aaff5beb8c9b136375b6d806",
+    name: "Geth/v1.17.5-stable-9621c6ad/linux-amd64/go1.26.5",
+    network: {
+      inbound: false,
+      localAddress: "172.30.0.11:33414",
+      remoteAddress: "172.30.0.12:30303",
+      static: false,
+      trusted: false
+    },
+    protocols: {
+      eth: {
+        earliestBlock: 0,
+        latestBlock: 0,
+        latestBlockHash: "0x286c98003d8084cb7b4df842a47ec5b6b21c8330deac596f96d1e637a58dfa5b",
+        version: 72
+      },
+      snap: {
+        version: 1
+      }
+    }
+}, {
+    caps: ["eth/69", "eth/70", "eth/71", "eth/72", "snap/1"],
+    enode: "enode://060f0700717e6427ae04ab1dab60f7b1c7bef598aef7ea77fd7b0236891536ad96d25c09407773f776a4bc00ea1099415bafabb0e9ce4440abd62209861db46d@172.30.0.13:30303",
+    enr: "enr:-KO4QF4NNmjABH8jU6iABAzopWwUHw8c_--cKOX_ydbSgB8PIDJdWfwhckBPR9_EdR7ESZa7xNYMLMbToV3KfmpxDTqGAaA_iLzWg2V0aMfGhGfRmtaAgmlkgnY0gmlwhKweAA2Jc2VjcDI1NmsxoQMGDwcAcX5kJ64Eqx2rYPexx771mK736nf9ewI2iRU2rYRzbmFwwIN0Y3CCdl-DdWRwgnZf",
+    id: "b637cdcdded01a7653240e872b849fdcbcc6ebf0d4c7786a114c234a62a5eea4",
+    name: "Geth/v1.17.5-stable-9621c6ad/linux-amd64/go1.26.5",
+    network: {
+      inbound: false,
+      localAddress: "172.30.0.11:42384",
+      remoteAddress: "172.30.0.13:30303",
+      static: false,
+      trusted: false
+    },
+    protocols: {
+      eth: {
+        earliestBlock: 0,
+        latestBlock: 0,
+        latestBlockHash: "0x286c98003d8084cb7b4df842a47ec5b6b21c8330deac596f96d1e637a58dfa5b",
+        version: 72
+      },
+      snap: {
+        version: 1
+      }
+    }
+}]
+}
+,
+{
+  "timestamp": "2026-09-05T15:50:37Z",
+  "node": "node2",
+  "container_name": "ethdropper_node2",
+  "ip_address": "172.30.0.12",
+  "enode": enode://1f2a5f08daa5415e56f69a8438c724285260d19db3ee37c0f57639d2c05c3b9ff9585edc0272dad57c655d911ac3dbe50b93543470bf855a69dfc913461e8b3c@172.30.0.12:30303,
+  "peer_count": "3",
+  "block_number": "0",
+  "peers_info": [{
+    caps: ["eth/69", "eth/70", "eth/71", "eth/72", "snap/1"],
+    enode: "enode://6a1c03a37b207111b37b74241892310d05d19349290e2eeb8d6c5e2f0a7d581e136be82e305175564d086fc141251930fd8fea416a906979aea03ae7c40f86f2@172.30.0.14:54444",
+    id: "0997367c920554507b576095480e36719a18258bc59ec6b3ac9ea70b3767b096",
+    name: "Geth/v1.17.5-stable-9621c6ad/linux-amd64/go1.26.5",
+    network: {
+      inbound: true,
+      localAddress: "172.30.0.12:30303",
+      remoteAddress: "172.30.0.14:54444",
+      static: false,
+      trusted: false
+    },
+    protocols: {
+      eth: {
+        earliestBlock: 0,
+        latestBlock: 0,
+        latestBlockHash: "0x286c98003d8084cb7b4df842a47ec5b6b21c8330deac596f96d1e637a58dfa5b",
+        version: 72
+      },
+      snap: {
+        version: 1
+      }
+    }
+}, {
+    caps: ["eth/69", "eth/70", "eth/71", "eth/72", "snap/1"],
+    enode: "enode://83035ed44df6c256e0b24a53ec438b5c28b243ee80d4796e9a75c1958eae98c5a827d31c337603b10d13ae5a389ce08c121042636db2d5909f3195da1e038441@172.30.0.11:33414",
+    id: "2961539e774bd4fcb73f9267150ea703bffd3fcab4888017d322a44b3e3d4934",
+    name: "Geth/v1.17.5-stable-9621c6ad/linux-amd64/go1.26.5",
+    network: {
+      inbound: true,
+      localAddress: "172.30.0.12:30303",
+      remoteAddress: "172.30.0.11:33414",
+      static: false,
+      trusted: false
+    },
+    protocols: {
+      eth: {
+        earliestBlock: 0,
+        latestBlock: 0,
+        latestBlockHash: "0x286c98003d8084cb7b4df842a47ec5b6b21c8330deac596f96d1e637a58dfa5b",
+        version: 72
+      },
+      snap: {
+        version: 1
+      }
+    }
+}, {
+    caps: ["eth/69", "eth/70", "eth/71", "eth/72", "snap/1"],
+    enode: "enode://060f0700717e6427ae04ab1dab60f7b1c7bef598aef7ea77fd7b0236891536ad96d25c09407773f776a4bc00ea1099415bafabb0e9ce4440abd62209861db46d@172.30.0.13:30303",
+    enr: "enr:-KO4QF4NNmjABH8jU6iABAzopWwUHw8c_--cKOX_ydbSgB8PIDJdWfwhckBPR9_EdR7ESZa7xNYMLMbToV3KfmpxDTqGAaA_iLzWg2V0aMfGhGfRmtaAgmlkgnY0gmlwhKweAA2Jc2VjcDI1NmsxoQMGDwcAcX5kJ64Eqx2rYPexx771mK736nf9ewI2iRU2rYRzbmFwwIN0Y3CCdl-DdWRwgnZf",
+    id: "b637cdcdded01a7653240e872b849fdcbcc6ebf0d4c7786a114c234a62a5eea4",
+    name: "Geth/v1.17.5-stable-9621c6ad/linux-amd64/go1.26.5",
+    network: {
+      inbound: false,
+      localAddress: "172.30.0.12:49218",
+      remoteAddress: "172.30.0.13:30303",
+      static: false,
+      trusted: false
+    },
+    protocols: {
+      eth: {
+        earliestBlock: 0,
+        latestBlock: 0,
+        latestBlockHash: "0x286c98003d8084cb7b4df842a47ec5b6b21c8330deac596f96d1e637a58dfa5b",
+        version: 72
+      },
+      snap: {
+        version: 1
+      }
+    }
+}]
+}
+,
+{
+  "timestamp": "2026-09-05T15:50:38Z",
+  "node": "node3",
+  "container_name": "ethdropper_node3",
+  "ip_address": "172.30.0.13",
+  "enode": enode://060f0700717e6427ae04ab1dab60f7b1c7bef598aef7ea77fd7b0236891536ad96d25c09407773f776a4bc00ea1099415bafabb0e9ce4440abd62209861db46d@172.30.0.13:30303,
+  "peer_count": "3",
+  "block_number": "0",
+  "peers_info": [{
+    caps: ["eth/69", "eth/70", "eth/71", "eth/72", "snap/1"],
+    enode: "enode://6a1c03a37b207111b37b74241892310d05d19349290e2eeb8d6c5e2f0a7d581e136be82e305175564d086fc141251930fd8fea416a906979aea03ae7c40f86f2@172.30.0.14:35138",
+    id: "0997367c920554507b576095480e36719a18258bc59ec6b3ac9ea70b3767b096",
+    name: "Geth/v1.17.5-stable-9621c6ad/linux-amd64/go1.26.5",
+    network: {
+      inbound: true,
+      localAddress: "172.30.0.13:30303",
+      remoteAddress: "172.30.0.14:35138",
+      static: false,
+      trusted: false
+    },
+    protocols: {
+      eth: {
+        earliestBlock: 0,
+        latestBlock: 0,
+        latestBlockHash: "0x286c98003d8084cb7b4df842a47ec5b6b21c8330deac596f96d1e637a58dfa5b",
+        version: 72
+      },
+      snap: {
+        version: 1
+      }
+    }
+}, {
+    caps: ["eth/69", "eth/70", "eth/71", "eth/72", "snap/1"],
+    enode: "enode://83035ed44df6c256e0b24a53ec438b5c28b243ee80d4796e9a75c1958eae98c5a827d31c337603b10d13ae5a389ce08c121042636db2d5909f3195da1e038441@172.30.0.11:42384",
+    id: "2961539e774bd4fcb73f9267150ea703bffd3fcab4888017d322a44b3e3d4934",
+    name: "Geth/v1.17.5-stable-9621c6ad/linux-amd64/go1.26.5",
+    network: {
+      inbound: true,
+      localAddress: "172.30.0.13:30303",
+      remoteAddress: "172.30.0.11:42384",
+      static: false,
+      trusted: false
+    },
+    protocols: {
+      eth: {
+        earliestBlock: 0,
+        latestBlock: 0,
+        latestBlockHash: "0x286c98003d8084cb7b4df842a47ec5b6b21c8330deac596f96d1e637a58dfa5b",
+        version: 72
+      },
+      snap: {
+        version: 1
+      }
+    }
+}, {
+    caps: ["eth/69", "eth/70", "eth/71", "eth/72", "snap/1"],
+    enode: "enode://1f2a5f08daa5415e56f69a8438c724285260d19db3ee37c0f57639d2c05c3b9ff9585edc0272dad57c655d911ac3dbe50b93543470bf855a69dfc913461e8b3c@172.30.0.12:49218",
+    id: "a679c77e5910d537931b6cb22dc264ddee299308aaff5beb8c9b136375b6d806",
+    name: "Geth/v1.17.5-stable-9621c6ad/linux-amd64/go1.26.5",
+    network: {
+      inbound: true,
+      localAddress: "172.30.0.13:30303",
+      remoteAddress: "172.30.0.12:49218",
+      static: false,
+      trusted: false
+    },
+    protocols: {
+      eth: {
+        earliestBlock: 0,
+        latestBlock: 0,
+        latestBlockHash: "0x286c98003d8084cb7b4df842a47ec5b6b21c8330deac596f96d1e637a58dfa5b",
+        version: 72
+      },
+      snap: {
+        version: 1
+      }
+    }
+}]
+}
+,
+{
+  "timestamp": "2026-09-05T15:50:40Z",
+  "node": "node4",
+  "container_name": "ethdropper_node4",
+  "ip_address": "172.30.0.14",
+  "enode": enode://6a1c03a37b207111b37b74241892310d05d19349290e2eeb8d6c5e2f0a7d581e136be82e305175564d086fc141251930fd8fea416a906979aea03ae7c40f86f2@172.30.0.14:30303,
+  "peer_count": "3",
+  "block_number": "0",
+  "peers_info": [{
+    caps: ["eth/69", "eth/70", "eth/71", "eth/72", "snap/1"],
+    enode: "enode://83035ed44df6c256e0b24a53ec438b5c28b243ee80d4796e9a75c1958eae98c5a827d31c337603b10d13ae5a389ce08c121042636db2d5909f3195da1e038441@172.30.0.11:48290",
+    id: "2961539e774bd4fcb73f9267150ea703bffd3fcab4888017d322a44b3e3d4934",
+    name: "Geth/v1.17.5-stable-9621c6ad/linux-amd64/go1.26.5",
+    network: {
+      inbound: true,
+      localAddress: "172.30.0.14:30303",
+      remoteAddress: "172.30.0.11:48290",
+      static: false,
+      trusted: false
+    },
+    protocols: {
+      eth: {
+        earliestBlock: 0,
+        latestBlock: 0,
+        latestBlockHash: "0x286c98003d8084cb7b4df842a47ec5b6b21c8330deac596f96d1e637a58dfa5b",
+        version: 72
+      },
+      snap: {
+        version: 1
+      }
+    }
+}, {
+    caps: ["eth/69", "eth/70", "eth/71", "eth/72", "snap/1"],
+    enode: "enode://1f2a5f08daa5415e56f69a8438c724285260d19db3ee37c0f57639d2c05c3b9ff9585edc0272dad57c655d911ac3dbe50b93543470bf855a69dfc913461e8b3c@172.30.0.12:30303",
+    enr: "enr:-KO4QFHiAsDbPgLEBNQ2-WToFVbmsOzJKm9y2AflZT3REbQ7PfKgw0qtUdDlXm_PDNA3qi_PBAnjxMEanVtMPpI2xAiGAaA_iLzug2V0aMfGhGfRmtaAgmlkgnY0gmlwhKweAAyJc2VjcDI1NmsxoQIfKl8I2qVBXlb2moQ4xyQoUmDRnbPuN8D1djnSwFw7n4RzbmFwwIN0Y3CCdl-DdWRwgnZf",
+    id: "a679c77e5910d537931b6cb22dc264ddee299308aaff5beb8c9b136375b6d806",
+    name: "Geth/v1.17.5-stable-9621c6ad/linux-amd64/go1.26.5",
+    network: {
+      inbound: false,
+      localAddress: "172.30.0.14:54444",
+      remoteAddress: "172.30.0.12:30303",
+      static: false,
+      trusted: false
+    },
+    protocols: {
+      eth: {
+        earliestBlock: 0,
+        latestBlock: 0,
+        latestBlockHash: "0x286c98003d8084cb7b4df842a47ec5b6b21c8330deac596f96d1e637a58dfa5b",
+        version: 72
+      },
+      snap: {
+        version: 1
+      }
+    }
+}, {
+    caps: ["eth/69", "eth/70", "eth/71", "eth/72", "snap/1"],
+    enode: "enode://060f0700717e6427ae04ab1dab60f7b1c7bef598aef7ea77fd7b0236891536ad96d25c09407773f776a4bc00ea1099415bafabb0e9ce4440abd62209861db46d@172.30.0.13:30303",
+    enr: "enr:-KO4QF4NNmjABH8jU6iABAzopWwUHw8c_--cKOX_ydbSgB8PIDJdWfwhckBPR9_EdR7ESZa7xNYMLMbToV3KfmpxDTqGAaA_iLzWg2V0aMfGhGfRmtaAgmlkgnY0gmlwhKweAA2Jc2VjcDI1NmsxoQMGDwcAcX5kJ64Eqx2rYPexx771mK736nf9ewI2iRU2rYRzbmFwwIN0Y3CCdl-DdWRwgnZf",
+    id: "b637cdcdded01a7653240e872b849fdcbcc6ebf0d4c7786a114c234a62a5eea4",
+    name: "Geth/v1.17.5-stable-9621c6ad/linux-amd64/go1.26.5",
+    network: {
+      inbound: false,
+      localAddress: "172.30.0.14:35138",
+      remoteAddress: "172.30.0.13:30303",
+      static: false,
+      trusted: false
+    },
+    protocols: {
+      eth: {
+        earliestBlock: 0,
+        latestBlock: 0,
+        latestBlockHash: "0x286c98003d8084cb7b4df842a47ec5b6b21c8330deac596f96d1e637a58dfa5b",
+        version: 72
+      },
+      snap: {
+        version: 1
+      }
+    }
+}]
+}
+]

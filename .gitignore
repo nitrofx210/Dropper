@@ -1,0 +1,7 @@
+# Runtime artifacts. NOTE: geth.ipc is an OS named pipe, not a file — git
+# cannot store it ("Function not implemented"). Any localnet run recreates
+# one inside the volume-mounted nodes/ dirs, so ignore by pattern.
+*.ipc
+
+# Go build output / module cache stays outside the repo; observer binary
+observer.exe

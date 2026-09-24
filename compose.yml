@@ -1,0 +1,72 @@
+services:
+  node1:
+    image: ethereum/client-go:stable
+    container_name: ethdropper_node1
+    entrypoint: [""]
+    command: ["/bin/sh", "-c", "geth init --datadir /data /genesis.json && exec geth --datadir /data --networkid 1337 --port 30303 --maxpeers 50 --verbosity 3 --http --http.addr 0.0.0.0 --http.port 8545 --http.api eth,net,web3,miner --http.corsdomain \"*\" --ws --ws.addr 0.0.0.0 --ws.port 8546 --ws.api eth,net,web3,miner --ws.origins \"*\" --syncmode full --nat extip:172.30.0.11 --coinbase 0xAbac9F99A31345dB7f388e6873E1CAFC25A2B8dc --bootnodes enode://83035ed44df6c256e0b24a53ec438b5c28b243ee80d4796e9a75c1958eae98c5a827d31c337603b10d13ae5a389ce08c121042636db2d5909f3195da1e038441@172.30.0.11:30303,enode://1f2a5f08daa5415e56f69a8438c724285260d19db3ee37c0f57639d2c05c3b9ff9585edc0272dad57c655d911ac3dbe50b93543470bf855a69dfc913461e8b3c@172.30.0.12:30303,enode://060f0700717e6427ae04ab1dab60f7b1c7bef598aef7ea77fd7b0236891536ad96d25c09407773f776a4bc00ea1099415bafabb0e9ce4440abd62209861db46d@172.30.0.13:30303,enode://6a1c03a37b207111b37b74241892310d05d19349290e2eeb8d6c5e2f0a7d581e136be82e305175564d086fc141251930fd8fea416a906979aea03ae7c40f86f2@172.30.0.14:30303 --mine"]
+    volumes:
+      - ./configs/genesis/genesis.json:/genesis.json:ro
+      - ./password.sec:/password.sec:ro
+      - ./nodes/node1:/data
+    ports:
+      - "8545:8545"
+      - "8546:8546"
+    networks:
+      ethnet:
+        ipv4_address: 172.30.0.11
+
+  node2:
+    image: ethereum/client-go:stable
+    container_name: ethdropper_node2
+    entrypoint: [""]
+    command: ["/bin/sh", "-c", "geth init --datadir /data /genesis.json && exec geth --datadir /data --networkid 1337 --port 30303 --maxpeers 50 --verbosity 3 --http --http.addr 0.0.0.0 --http.port 8545 --http.api eth,net,web3 --http.corsdomain \"*\" --ws --ws.addr 0.0.0.0 --ws.port 8546 --ws.api eth,net,web3 --ws.origins \"*\" --syncmode full --nat extip:172.30.0.12 --bootnodes enode://83035ed44df6c256e0b24a53ec438b5c28b243ee80d4796e9a75c1958eae98c5a827d31c337603b10d13ae5a389ce08c121042636db2d5909f3195da1e038441@172.30.0.11:30303,enode://1f2a5f08daa5415e56f69a8438c724285260d19db3ee37c0f57639d2c05c3b9ff9585edc0272dad57c655d911ac3dbe50b93543470bf855a69dfc913461e8b3c@172.30.0.12:30303,enode://060f0700717e6427ae04ab1dab60f7b1c7bef598aef7ea77fd7b0236891536ad96d25c09407773f776a4bc00ea1099415bafabb0e9ce4440abd62209861db46d@172.30.0.13:30303,enode://6a1c03a37b207111b37b74241892310d05d19349290e2eeb8d6c5e2f0a7d581e136be82e305175564d086fc141251930fd8fea416a906979aea03ae7c40f86f2@172.30.0.14:30303"]
+    volumes:
+      - ./configs/genesis/genesis.json:/genesis.json:ro
+      - ./password.sec:/password.sec:ro
+      - ./nodes/node2:/data
+    ports:
+      - "8547:8545"
+      - "8548:8546"
+    networks:
+      ethnet:
+        ipv4_address: 172.30.0.12
+
+  node3:
+    image: ethereum/client-go:stable
+    container_name: ethdropper_node3
+    entrypoint: [""]
+    command: ["/bin/sh", "-c", "geth init --datadir /data /genesis.json && exec geth --datadir /data --networkid 1337 --port 30303 --maxpeers 50 --verbosity 3 --http --http.addr 0.0.0.0 --http.port 8545 --http.api eth,net,web3 --http.corsdomain \"*\" --ws --ws.addr 0.0.0.0 --ws.port 8546 --ws.api eth,net,web3 --ws.origins \"*\" --syncmode full --nat extip:172.30.0.13 --bootnodes enode://83035ed44df6c256e0b24a53ec438b5c28b243ee80d4796e9a75c1958eae98c5a827d31c337603b10d13ae5a389ce08c121042636db2d5909f3195da1e038441@172.30.0.11:30303,enode://1f2a5f08daa5415e56f69a8438c724285260d19db3ee37c0f57639d2c05c3b9ff9585edc0272dad57c655d911ac3dbe50b93543470bf855a69dfc913461e8b3c@172.30.0.12:30303,enode://060f0700717e6427ae04ab1dab60f7b1c7bef598aef7ea77fd7b0236891536ad96d25c09407773f776a4bc00ea1099415bafabb0e9ce4440abd62209861db46d@172.30.0.13:30303,enode://6a1c03a37b207111b37b74241892310d05d19349290e2eeb8d6c5e2f0a7d581e136be82e305175564d086fc141251930fd8fea416a906979aea03ae7c40f86f2@172.30.0.14:30303"]
+    volumes:
+      - ./configs/genesis/genesis.json:/genesis.json:ro
+      - ./password.sec:/password.sec:ro
+      - ./nodes/node3:/data
+    ports:
+      - "8549:8545"
+      - "8550:8546"
+    networks:
+      ethnet:
+        ipv4_address: 172.30.0.13
+
+  node4:
+    image: ethereum/client-go:stable
+    container_name: ethdropper_node4
+    entrypoint: [""]
+    command: ["/bin/sh", "-c", "geth init --datadir /data /genesis.json && exec geth --datadir /data --networkid 1337 --port 30303 --maxpeers 50 --verbosity 3 --http --http.addr 0.0.0.0 --http.port 8545 --http.api eth,net,web3 --http.corsdomain \"*\" --ws --ws.addr 0.0.0.0 --ws.port 8546 --ws.api eth,net,web3 --ws.origins \"*\" --syncmode full --nat extip:172.30.0.14 --bootnodes enode://83035ed44df6c256e0b24a53ec438b5c28b243ee80d4796e9a75c1958eae98c5a827d31c337603b10d13ae5a389ce08c121042636db2d5909f3195da1e038441@172.30.0.11:30303,enode://1f2a5f08daa5415e56f69a8438c724285260d19db3ee37c0f57639d2c05c3b9ff9585edc0272dad57c655d911ac3dbe50b93543470bf855a69dfc913461e8b3c@172.30.0.12:30303,enode://060f0700717e6427ae04ab1dab60f7b1c7bef598aef7ea77fd7b0236891536ad96d25c09407773f776a4bc00ea1099415bafabb0e9ce4440abd62209861db46d@172.30.0.13:30303,enode://6a1c03a37b207111b37b74241892310d05d19349290e2eeb8d6c5e2f0a7d581e136be82e305175564d086fc141251930fd8fea416a906979aea03ae7c40f86f2@172.30.0.14:30303"]
+    volumes:
+      - ./configs/genesis/genesis.json:/genesis.json:ro
+      - ./password.sec:/password.sec:ro
+      - ./nodes/node4:/data
+    ports:
+      - "8551:8545"
+      - "8552:8546"
+    networks:
+      ethnet:
+        ipv4_address: 172.30.0.14
+
+networks:
+  ethnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+          gateway: 172.30.0.1
