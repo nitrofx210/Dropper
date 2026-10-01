@@ -20,11 +20,7 @@ Per the project decisions already in force: Go with `github.com/ethereum/go-ethe
 - **One flagged deviation from "exactly what's currently there":** `nodes/node1_test4/geth.ipc` is an OS **named pipe**, not a file — git cannot store it (`error: unable to index file … Function not implemented`). Excluded via `.gitignore` (`*.ipc`). This exclusion is also forward-correct: every localnet start recreates a live IPC named pipe inside the volume-mounted `nodes/` directories, and those can never be committed. Everything else is in the commit.
 - Historical note: this repo now contains testnet account keystores and their password files. They protect nothing of value (private chain only), but if repo-sharing ever happens, a credential purge + history rewrite should happen first.
 
-### 2.2 Stray containers stopped
-
-The unrelated `geth` and `lighthouse` containers that were stuck in a restart loop (report §1.1) were stopped. Post-stop state (verified with `docker ps -a`): both `Exited`; the four `ethdropper_node*` containers remain (untouched); the localnet compose setup is fully retained as the Stage 2 validation rig.
-
-### 2.3 Go module pinned and toolchain verified end-to-end
+### 2.2 Go module pinned and toolchain verified end-to-end
 
 - `go mod init github.com/kingd/ethereum-dropper-lab` — `go 1.26.5`, windows/amd64 (Go at `C:\Go\bin`, off PATH; exported per command).
 - Dependencies (`go.mod require`): `github.com/ethereum/go-ethereum v1.17.5` and `modernc.org/sqlite v1.59.0`. `go list -m` confirms resolution to `v1.17.5`, which is tag `v1.17.5` = commit `9621c6ad10934a01b5514886fb6fbd87640b6c05` — **the same commit as the Docker image audited in the Phase 0 report (§1.3)**. The older local master clone was not used anywhere.
@@ -46,9 +42,8 @@ The unrelated `geth` and `lighthouse` containers that were stuck in a restart lo
 | Claim | Evidence |
 |---|---|
 | go-ethereum dependency is exactly v1.17.5 | `go list -m github.com/ethereum/go-ethereum` → `v1.17.5`; tag↔commit match to Docker image established in phase0 report §1.3/§10 |
-| Toolchain works end-to-end on windows/amd64 | toolcheck build+run output quoted in §2.3; vet clean |
+| Toolchain works end-to-end on windows/amd64 | toolcheck build+run output quoted in §2.2; vet clean |
 | Named-pipe exclusion was necessary, not cosmetic | raw git error: `error: open("nodes/node1_test4/geth.ipc"): Function not implemented` |
-| Stray containers stopped | `docker ps -a` shows `geth` / `lighthouse` Exited; only one `*.ipc` artifact exists in the tree (searched, `find . -name "*.ipc*"`) |
 | Baseline contains what was specified | `git log --stat 07a8609`; only exclusion documented in §2.1 |
 
 ## 4. Research-integrity notes for this stage
