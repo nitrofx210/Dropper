@@ -41,3 +41,12 @@ observer_stage*.log
 observer_stage*.db*
 resolver.exe~
 insert_test_data
+
+# Upstream clones are tracked separately — do not commit them here.
+go-ethereum/
+simnet/
+ethp2p/
+
+# Temp / office lock files
+~$*.docx
+_testout.txt
