@@ -1,7 +1,43 @@
-# Runtime artifacts. NOTE: geth.ipc is an OS named pipe, not a file — git
-# cannot store it ("Function not implemented"). Any localnet run recreates
-# one inside the volume-mounted nodes/ dirs, so ignore by pattern.
-*.ipc
+# Build artifacts
+*.exe
+observer
+resolver
+analyzer
 
-# Go build output / module cache stays outside the repo; observer binary
-observer.exe
+# Database files
+*.db
+*.db-shm
+*.db-wal
+
+# Logs
+*.log
+out.log
+
+# Node data
+nodes/
+
+# Scripts
+scripts/
+scripts_backup/
+
+# Validation test
+validation_test/
+
+# Test configs
+compose.yml
+compose.yml.bak
+local_testnet_config.json
+local_testnet_config2.json
+stage2_testnet_config.json
+stage3_mainnet_pilot_config.json
+test_config.json
+test_config_fixed.json
+test_dissemination_config.json
+test_dissemination_config_disabled.json
+
+# Misc
+observer_output.log
+observer_stage*.log
+observer_stage*.db*
+resolver.exe~
+insert_test_data

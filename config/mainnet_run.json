@@ -1,0 +1,16 @@
+{
+  "listen_addr": ":30306",
+  "max_peers": 50,
+  "mode": "passive",
+  "data_label": "MAINNET_OBSERVATION",
+  "storage_path": "observer.db",
+  "bootnodes": [],
+  "nat": "",
+  "no_discovery": false,
+  "dial_timeout": "5s",
+  "tx_dissemination_enabled": true,
+  "tx_dissemination_rate_limit": 10,
+  "resolver_rpc_endpoint": "",
+  "resolver_max_attempts": 5,
+  "resolver_base_delay": "1s"
+}
