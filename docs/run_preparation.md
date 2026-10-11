@@ -1,5 +1,7 @@
 # Mainnet Collection Run Preparation
 
+***SUPERSEDED**: This document has been superseded by the Per-Block Resolver Design (docs/resolver-per-block-design.md). Please refer to the latest design for current implementation details.*
+
 ## Configuration
 - **Config file**: `config/mainnet_run.json` (with `tx_dissemination_enabled: true`)
 - **Data label**: `MAINNET_OBSERVATION` (set in config, can be overridden by `--label` flag)
