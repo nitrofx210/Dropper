@@ -1,0 +1,31 @@
+{
+    "listen_addr":  ":30306",
+    "max_peers":  50,
+    "mode":  "passive",
+    "data_label":  "MAINNET_OBSERVATION",
+    "storage_path":  "mainnet_pilot_2026-10-25.db",
+    "bootnodes":  [
+
+                  ],
+    "nat":  "",
+    "no_discovery":  false,
+    "dial_timeout":  5000000000,
+    "tx_dissemination_enabled":  false,
+    "tx_dissemination_rate_limit":  10,
+    "observer_id":  "observer-001",
+    "geth_lib_version":  "go-ethereum/v1.17.7",
+    "go_build_version":  "go1.26.5",
+    "collector_git_commit":  "",
+    "config_hash":  "",
+    "schema_version":  "1",
+    "notes":  "",
+    "log_level":  "debug",
+    "rpc_endpoint":  "https://eth.drpc.org",
+    "max_attempts":  5,
+    "base_delay":  1000000000,
+    "status_rpc_endpoint":  "https://eth.drpc.org",
+    "status_rpc_timeout":  10000000000,
+    "post_run_margin":  3600,
+    "batch_size":  20,
+    "max_concurrent_requests":  5
+}
