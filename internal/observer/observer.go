@@ -491,6 +491,18 @@ func (o *Observer) logStatusHandshake(ctx context.Context) error {
 		"head_timestamp", head.Time,
 		"rpc_endpoint", rpcEndpoint,
 	)
+
+	// Thread the live chain metadata into the eth handler so every peer
+	// connection performs the real eth Status handshake (send + validate)
+	// instead of deadlocking waiting for the peer to send Status first.
+	o.ethHandler.SetChainInfo(
+		params.MainnetChainConfig.ChainID.Uint64(),
+		genesis,
+		head.Number.Uint64(),
+		head.Hash(),
+		head.Time,
+	)
+
 	return nil
 }
 
