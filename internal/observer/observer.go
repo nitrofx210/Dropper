@@ -68,9 +68,13 @@ type Observer struct {
 	wg         sync.WaitGroup
 	ctx        context.Context
 	cancel     context.CancelFunc
-	// outboundPeers tracks peer IDs we dial outbound (bootnodes + static nodes)
-	// so peer events can report direction correctly.
-	outboundPeers map[enode.ID]struct{}
+	// peerDir records whether each known peer is outbound (true) or inbound (false).
+	// Populated from the eth handler via handlePeerDirection, which has the actual
+	// *p2p.Peer (and thus p.Inbound()). Direction for connect/disconnect peer events
+	// is looked up here so discovery-dialed peers are reported outbound instead of
+	// being mislabeled inbound via the bootnode set.
+	peerDirMu sync.Mutex
+	peerDir   map[enode.ID]bool
 
 	// stats tracks runtime counters for periodic logging.
 	startTime time.Time
@@ -166,6 +170,14 @@ func (o *Observer) Start(ctx context.Context) error {
 	// Thread the real run ID and observer ID into the eth handler so all
 	// observations and peer events are labelled with the active collection run.
 	o.ethHandler.SetRunContext(runID, o.cfg.ObserverID)
+
+	// Report each peer's actual direction (p.Inbound()) to the observer so
+	// connect/disconnect peer events are accurate (Task 3).
+	o.ethHandler.SetPeerDirCallback(func(id enode.ID, outbound bool) {
+		o.peerDirMu.Lock()
+		o.peerDir[id] = outbound
+		o.peerDirMu.Unlock()
+	})
 
 	// Start server
 	if err := o.server.Start(); err != nil {
@@ -280,9 +292,15 @@ func (o *Observer) statsLogger() {
 }
 
 // logAndStorePeerEvent logs and persists a single peer lifecycle event.
+// Direction comes from peerDir: discovery-dialed peers are outbound (true),
+// inbound peers are not (false). This supersedes the old bootnode-set check
+// which mislabeled discovery-dialed (dyndial) peers as inbound.
 func (o *Observer) logAndStorePeerEvent(runID int64, ev *p2p.PeerEvent) error {
+	o.peerDirMu.Lock()
+	isOutbound, known := o.peerDir[ev.Peer]
+	o.peerDirMu.Unlock()
 	direction := "inbound"
-	if _, isOutbound := o.outboundPeers[ev.Peer]; isOutbound {
+	if known && isOutbound {
 		direction = "outbound"
 	}
 
@@ -335,8 +353,10 @@ func (o *Observer) initP2PServer() (bootnodesOK, bootnodesSkipped, staticNodesOK
 		return 0, 0, 0, 0, fmt.Errorf("failed to generate private key: %w", err)
 	}
 
-	// Get our eth protocol
-	ethProto := o.ethHandler.Protocol()
+	// Get our eth protocols: one p2p.Protocol per supported eth version (69-72).
+	// The p2p server negotiates a common version with each peer, so each peer's
+	// Status handshake uses the negotiated version of THAT protocol instance.
+	ethProtos := o.ethHandler.ProtocolVersions()
 
 	// Listen address from config, fallback to default if empty
 	listenAddr := o.cfg.ListenAddr
@@ -393,7 +413,7 @@ func (o *Observer) initP2PServer() (bootnodesOK, bootnodesSkipped, staticNodesOK
 		PrivateKey:     privateKey,
 		Name:           "ethereum-dropper",
 		ListenAddr:     listenAddr,
-		Protocols:      []p2p.Protocol{ethProto},
+		Protocols:      ethProtos,
 		NoDiscovery:    o.cfg.NoDiscovery, // Wire from config (not hardcoded)
 		DiscoveryV4:    true,              // Enable v4 discovery (bootnode bootstrap + dial candidates) — geth mainnet default true (node/defaults.go:76)
 		DiscoveryV5:    true,              // Enable v5 discovery — geth mainnet default true (node/defaults.go:77)
@@ -418,13 +438,15 @@ func (o *Observer) initP2PServer() (bootnodesOK, bootnodesSkipped, staticNodesOK
 		"static_nodes_total", len(staticNodes),
 	)
 
-	// Track outbound peer identities so connect/disconnect events report direction.
-	o.outboundPeers = make(map[enode.ID]struct{})
+	// Track each known peer's direction (outbound=true for dialed bootnodes/static,
+	// inbound=false). Direction for discovery-dialed peers is later corrected from
+	// the actual *p2p.Peer via handlePeerDirection, which uses p.Inbound().
+	o.peerDir = make(map[enode.ID]bool)
 	for _, n := range bootstrapNodes {
-		o.outboundPeers[n.ID()] = struct{}{}
+		o.peerDir[n.ID()] = true // outbound (dialed)
 	}
 	for _, n := range staticNodes {
-		o.outboundPeers[n.ID()] = struct{}{}
+		o.peerDir[n.ID()] = true // outbound (dialed)
 	}
 
 	return bootnodesOK, bootnodesSkipped, staticNodesOK, staticNodesSkipped, nil

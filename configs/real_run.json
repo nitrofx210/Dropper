@@ -19,7 +19,7 @@
     "config_hash":  "",
     "schema_version":  "1",
     "notes":  "",
-    "log_level":  "debug",
+    "log_level":  "info",
     "rpc_endpoint":  "https://eth.drpc.org",
     "max_attempts":  5,
     "base_delay":  1000000000,

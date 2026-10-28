@@ -1,19 +1,27 @@
 package storage
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
+	"github.com/ethereum/go-ethereum/log"
 	ethprot "github.com/ethereum/go-ethereum/eth/protocols/eth"
 )
 
 // Storage handles persistence of observations to SQLite
 type Storage struct {
 	db *sql.DB
+}
+
+// DB returns the underlying database connection
+func (s *Storage) DB() *sql.DB {
+	return s.db
 }
 
 // New creates a new Storage instance
@@ -159,11 +167,116 @@ func initSchema(db *sql.DB) error {
 		return fmt.Errorf("failed to create next_check index: %w", err)
 	}
 
+	// Create index on tx_hash for efficient lookup
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_tracked_transactions_tx_hash ON tracked_transactions(tx_hash);`); err != nil {
+		return fmt.Errorf("failed to create tx_hash index: %w", err)
+	}
+
+	// Create transaction_inclusion table for storing external lookup results.
+	// Point 4: append-only — a new row is written per resolve run (identified by resolve_run_id),
+	// so INSERT is used instead of INSERT OR REPLACE and earlier results are never overwritten.
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS transaction_inclusion (
+			tx_hash BLOB NOT NULL,
+			resolve_run_id INTEGER NOT NULL,
+			block_number INTEGER NOT NULL,
+			block_hash BLOB NOT NULL,
+			inclusion_time_ns INTEGER NOT NULL,
+			finalized_checked_at_ns INTEGER NOT NULL,
+			finalization_estimate_ns INTEGER NOT NULL,
+			lookup_source TEXT NOT NULL,
+			last_lookup_ns INTEGER NOT NULL,
+			lookup_attempts INTEGER NOT NULL,
+			delivered_before_block INTEGER DEFAULT 0,
+			PRIMARY KEY (tx_hash, resolve_run_id)
+		);
+	`); err != nil {
+		return fmt.Errorf("failed to create transaction_inclusion table: %w", err)
+	}
+
+	// Create index on block_number for efficient querying by block
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_transaction_inclusion_block_number ON transaction_inclusion(block_number);`); err != nil {
+		return fmt.Errorf("failed to create block_number index: %w", err)
+	}
+
+	// Point 2: resolver_runs table — per-execution resolver run IDs, separate
+	// from collection run IDs, so the resolver labels its append-only
+	// transaction_inclusion rows with its own run ID and re-run/resume never
+	// conflicts with collection run IDs.
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS resolver_runs (
+			run_id INTEGER PRIMARY KEY,
+			start_ns INTEGER NOT NULL,
+			end_ns INTEGER,
+			observer_id TEXT NOT NULL,
+			geth_lib_version TEXT NOT NULL,
+			go_build_version TEXT NOT NULL,
+			config_hash TEXT NOT NULL,
+			schema_version TEXT NOT NULL,
+			notes TEXT
+		);
+	`); err != nil {
+		return fmt.Errorf("failed to create resolver_runs table: %w", err)
+	}
+
+	// Index on start_ns for efficient latest-run lookup
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_resolver_runs_start_ns ON resolver_runs(start_ns);`); err != nil {
+		return fmt.Errorf("failed to create resolver run start_ns index: %w", err)
+	}
+
+	// Point 4 migration path: add resolve_run_id and included_flag columns if missing
+	// (for DBs created by older schema). resolve_run_id defaults to 0 so earlier rows keep their identity.
+	if _, err := db.Exec(`ALTER TABLE transaction_inclusion ADD COLUMN resolve_run_id INTEGER NOT NULL DEFAULT 0`); err != nil {
+		if !isDuplicateColumnErr(err) {
+			return fmt.Errorf("failed to add resolve_run_id column: %w", err)
+		}
+	}
+	if _, err := db.Exec(`ALTER TABLE transaction_inclusion ADD COLUMN delivered_before_block INTEGER DEFAULT 0`); err != nil {
+		if !isDuplicateColumnErr(err) {
+			return fmt.Errorf("failed to add delivered_before_block column: %w", err)
+		}
+	}
+
 	return nil
 }
 
-// StoreTxObservation saves a transaction observation
-func (s *Storage) StoreTxObservation(peerID string, txHash []byte, msgType uint64, txType uint8, announcedSize uint32, rawTx []byte, isAnnouncement bool, custodyMask []byte) error {
+// isDuplicateColumnErr checks whether a SQLite error is a "duplicate column" error.
+func isDuplicateColumnErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return containsIgnoreCase(msg, "duplicate column") ||
+		containsIgnoreCase(msg, "already exists")
+}
+
+func containsIgnoreCase(s, substr string) bool {
+	lower := toLower(s)
+	sub := toLower(substr)
+	for i := 0; i+len(sub) <= len(lower); i++ {
+		if lower[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}
+
+func toLower(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r >= 'A' && r <= 'Z' {
+			b.WriteRune(r + 32)
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// StoreTxObservation saves a transaction observation.
+// runID and observerID come from the active collection run (labelled by data_label in collection_runs).
+func (s *Storage) StoreTxObservation(runID int64, observerID string, peerID string, txHash []byte, msgType uint64, txType uint8, announcedSize uint32, rawTx []byte, isAnnouncement bool, custodyMask []byte) error {
 	// Determine message type string
 	var msgTypeStr string
 	switch msgType {
@@ -188,10 +301,8 @@ func (s *Storage) StoreTxObservation(peerID string, txHash []byte, msgType uint6
 			raw_transaction, source_confidence, custody_mask
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-		// These would come from the run context in a real implementation
-		// For now, using placeholder values
-		1, // run_id
-		"observer-001", // observer_id
+		runID,
+		observerID,
 		peerID,
 		txHash,
 		time.Now().UnixNano(),
@@ -229,8 +340,9 @@ func (s *Storage) StoreTxObservation(peerID string, txHash []byte, msgType uint6
 	return nil
 }
 
-// StorePeerEvent saves a peer lifecycle event
-func (s *Storage) StorePeerEvent(peerID string, eventType string, direction string, clientName string, clientVersion string, enode string, remoteAddr string, ethVersion int, detailJSON string) error {
+// StorePeerEvent saves a peer lifecycle event.
+// runID and observerID come from the active collection run (labelled by data_label in collection_runs).
+func (s *Storage) StorePeerEvent(runID int64, observerID string, peerID string, eventType string, direction string, clientName string, clientVersion string, enode string, remoteAddr string, ethVersion int, detailJSON string) error {
 	// Insert the peer event
 	_, err := s.db.Exec(`
 		INSERT INTO peer_events (
@@ -239,8 +351,8 @@ func (s *Storage) StorePeerEvent(peerID string, eventType string, direction stri
 			eth_version, detail_json
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-		1, // run_id - placeholder
-		"observer-001", // observer_id - placeholder
+		runID,
+		observerID,
 		peerID,
 		eventType,
 		direction,
@@ -257,6 +369,36 @@ func (s *Storage) StorePeerEvent(peerID string, eventType string, direction stri
 	}
 
 	return nil
+}
+
+// StartCollectionRun inserts a new collection run row with start_ns set and returns the new run id
+func (s *Storage) StartCollectionRun(run *CollectionRun) (int64, error) {
+	res, err := s.db.Exec(`
+		INSERT INTO collection_runs (
+			start_ns, end_ns, observer_id, geth_lib_version,
+			go_build_version, collector_git_commit, config_hash,
+			schema_version, mode, data_label, notes
+		) VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		run.StartTime.UnixNano(),
+		run.ObserverID,
+		run.GethLibVersion,
+		run.GoBuildVersion,
+		run.CollectorGitCommit,
+		run.ConfigHash,
+		run.SchemaVersion,
+		run.Mode,
+		run.DataLabel,
+		run.Notes,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("failed to start collection run: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get last insert id: %w", err)
+	}
+	return id, nil
 }
 
 // StoreCollectionRun saves collection run metadata
@@ -403,4 +545,120 @@ func (s *Storage) GetLastRunID() (int64, error) {
 		return 0, nil // no runs yet
 	}
 	return nullID.Int64, nil
+}
+
+// GetLastRunTimes gets the start and end times of the most recent run
+func (s *Storage) GetLastRunTimes() (int64, int64, error) {
+	var startTime, endTime sql.NullInt64
+	err := s.db.QueryRow(`
+		SELECT start_ns, end_ns
+		FROM collection_runs
+		WHERE run_id = (SELECT MAX(run_id) FROM collection_runs)
+	`).Scan(&startTime, &endTime)
+	if err != nil {
+		// Handle the case where no runs exist
+		if err == sql.ErrNoRows {
+			return 0, 0, nil // no runs yet
+		}
+		return 0, 0, fmt.Errorf("failed to get last run times: %w", err)
+	}
+	if !startTime.Valid || !endTime.Valid {
+		return 0, 0, nil // no runs yet or invalid times
+	}
+	return startTime.Int64, endTime.Int64, nil
+}
+
+// Point 2: resolver run helpers (resolver_runs table, separate from collection_runs).
+
+// StartResolverRun inserts a new resolver run row with start_ns set and returns the new run id
+func (s *Storage) StartResolverRun(startTime time.Time, observerID, gethLibVersion, goBuildVersion, configHash, schemaVersion, notes string) (int64, error) {
+	res, err := s.db.Exec(`
+		INSERT INTO resolver_runs (
+			start_ns, end_ns, observer_id, geth_lib_version,
+			go_build_version, config_hash, schema_version, notes
+		) VALUES (?, 0, ?, ?, ?, ?, ?, ?)
+	`,
+		startTime.UnixNano(),
+		observerID,
+		gethLibVersion,
+		goBuildVersion,
+		configHash,
+		schemaVersion,
+		notes,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("failed to start resolver run: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get last insert id: %w", err)
+	}
+	return id, nil
+}
+
+// UpdateResolverRunEndTime sets end_ns for the given resolver run id
+func (s *Storage) UpdateResolverRunEndTime(runID int64) error {
+	_, err := s.db.Exec(`
+		UPDATE resolver_runs
+		SET end_ns = ?
+		WHERE run_id = ?
+	`, time.Now().UnixNano(), runID)
+	if err != nil {
+		return fmt.Errorf("failed to update resolver run end time: %w", err)
+	}
+	return nil
+}
+
+// GetLastResolverRunID gets the ID of the most recent resolver run
+func (s *Storage) GetLastResolverRunID() (int64, error) {
+	var nullID sql.NullInt64
+	err := s.db.QueryRow(`SELECT MAX(run_id) FROM resolver_runs`).Scan(&nullID)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get last resolver run ID: %w", err)
+	}
+	if !nullID.Valid {
+		return 0, nil // no resolver runs yet
+	}
+	return nullID.Int64, nil
+}
+
+// Point 3: 60s heartbeat update to collection_runs end_ns so a crash leaves a usable end time.
+const HeartbeatInterval = 60 * time.Second
+
+// HeartbeatCollectionRun periodically refreshes end_ns for the given collection
+// run id until ctx is cancelled. On crash (ctx cancelled via signal), the last
+// heartbeat value is the crash time — a usable end time.
+func (s *Storage) HeartbeatCollectionRun(ctx context.Context, runID int64) error {
+	ticker := time.NewTicker(HeartbeatInterval)
+	defer ticker.Stop()
+
+	// Do an immediate heartbeat so end_ns is set from the start
+	if err := s.UpdateCollectionRunEndTime(runID); err != nil {
+		return fmt.Errorf("initial heartbeat: %w", err)
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if err := s.UpdateCollectionRunEndTime(runID); err != nil {
+				log.Error("Heartbeat failed", "run_id", runID, "err", err)
+				// Non-fatal: keep trying
+			}
+		}
+	}
+}
+
+// UpdateCollectionRunEndTime sets end_ns for the given run id (e.g. on Ctrl+C shutdown)
+func (s *Storage) UpdateCollectionRunEndTime(runID int64) error {
+	_, err := s.db.Exec(`
+		UPDATE collection_runs
+		SET end_ns = ?
+		WHERE run_id = ?
+	`, time.Now().UnixNano(), runID)
+	if err != nil {
+		return fmt.Errorf("failed to update collection run end time: %w", err)
+	}
+	return nil
 }

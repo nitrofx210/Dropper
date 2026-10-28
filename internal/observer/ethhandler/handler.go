@@ -3,6 +3,7 @@ package ethhandler
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/forkid"
 	"github.com/ethereum/go-ethereum/core/types"
 	ethprot "github.com/ethereum/go-ethereum/eth/protocols/eth"
+	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/p2p"
 	"github.com/ethereum/go-ethereum/params"
@@ -68,6 +70,16 @@ type EthHandler struct {
 	latestBlock     uint64
 	latestBlockHash common.Hash
 	latestBlockTime uint64
+
+	// onPeerDir reports each peer's actual direction (true=outbound) to the
+	// observer so connect/disconnect peer events use p.Inbound() rather than
+	// the bootnode set.
+	onPeerDir func(enode.ID, bool)
+}
+
+// SetPeerDirCallback registers the callback that reports each peer's actual direction.
+func (h *EthHandler) SetPeerDirCallback(cb func(enode.ID, bool)) {
+	h.onPeerDir = cb
 }
 
 // New creates a new EthHandler
@@ -107,13 +119,44 @@ func (h *EthHandler) SetDisseminationConfig(enabled bool, rateLimit int) {
 	h.txReannounceRateLimiter = newRateLimiter(float64(rateLimit))
 }
 
-// Protocol returns our eth protocol
-func (h *EthHandler) Protocol() p2p.Protocol {
-	return p2p.Protocol{
-		Name:    "eth",
-		Version: ethprot.ETH72, // We advertise eth/72; peer negotiates a common version
-		Length:  22,            // eth/72 has 22 messages (see eth/protocol.go protocolLengths)
-		Run:     h.handle,
+// ProtocolVersions returns one p2p.Protocol per supported eth version
+// (eth/69-72). Each protocol instance carries its own Version so the p2p
+// server can negotiate a common version with the peer, and each instance's
+// Run closure captures that negotiated version for the Status handshake.
+// The StatusPacket struct is identical across versions 69-72
+// (eth/protocols/eth/protocol.go:97-106); only message Length differs.
+func (h *EthHandler) ProtocolVersions() []p2p.Protocol {
+	versions := []uint{ethprot.ETH69, ethprot.ETH70, ethprot.ETH71, ethprot.ETH72}
+	protos := make([]p2p.Protocol, 0, len(versions))
+	for _, version := range versions {
+		protos = append(protos, p2p.Protocol{
+			Name:    ethprot.ProtocolName,
+			Version: version,
+			Length:  ProtocolLength(version),
+			Run: func(ver uint) func(p *p2p.Peer, rw p2p.MsgReadWriter) error {
+				return func(p *p2p.Peer, rw p2p.MsgReadWriter) error {
+					return h.handle(p, rw, ver)
+				}
+			}(version),
+		})
+	}
+	return protos
+}
+
+// ProtocolLength returns the number of implemented messages for the given eth
+// protocol version (eth/protocol.go protocolLengths).
+func ProtocolLength(version uint) uint64 {
+	switch version {
+	case ethprot.ETH69:
+		return 18
+	case ethprot.ETH70:
+		return 18
+	case ethprot.ETH71:
+		return 20
+	case ethprot.ETH72:
+		return 22
+	default:
+		return 0
 	}
 }
 
@@ -170,14 +213,56 @@ func (h *EthHandler) doHandshake(p *p2p.Peer, rw p2p.MsgReadWriter, version uint
 	return nil
 }
 
-// Handle is the main protocol handler
-func (h *EthHandler) handle(p *p2p.Peer, rw p2p.MsgReadWriter) error {
+// parseClient splits an advertised peer name like "Geth/v1.17.7-stable/..."
+// into client name ("Geth") and client version ("v1.17.7-stable").
+func parseClient(fullname string) (clientName, clientVersion string) {
+	parts := strings.SplitN(fullname, "/", 2)
+	if len(parts) == 2 {
+		clientName = parts[0]
+		if rest := strings.SplitN(parts[1], " ", 2); len(rest) > 0 {
+			clientVersion = rest[0]
+		}
+	}
+	return clientName, clientVersion
+}
+
+// Handle is the main protocol handler. version is the negotiated eth protocol
+// version of THIS protocol instance (NOT hardcoded ETH72), captured from the
+// p2p.Protocol.Version the server matched during capability negotiation.
+func (h *EthHandler) handle(p *p2p.Peer, rw p2p.MsgReadWriter, version uint) error {
 	// Run the eth sub-protocol handshake before reading any messages: send our
 	// Status first (peer waits for it per eth/protocols/eth/handshake.go:57),
 	// then read and validate the peer's Status. Without this the peer and we
 	// both wait for the other to send Status first and the connection drops.
-	if err := h.doHandshake(p, rw, uint(h.Protocol().Version)); err != nil {
+	if err := h.doHandshake(p, rw, version); err != nil {
+		log.Error("eth handshake failed", "peer", p.ID(), "version", version, "err", err)
+		h.storePeerEvent(p, "disconnect", int(version), "", "", fmt.Sprintf("eth handshake failed: %v", err))
 		return fmt.Errorf("eth handshake failed: %w", err)
+	}
+
+	// peer address/short id for logging
+	id := p.ID()
+	shortID := fmt.Sprintf("%x", id[:4])
+	remoteAddr := p.RemoteAddr().String()
+	if remoteAddr == "" {
+		remoteAddr = p.Node().URLv4()
+	}
+	clientName, clientVersion := parseClient(p.Fullname())
+
+	headLog := fmt.Sprintf("block %d (%x)", h.latestBlock, h.latestBlockHash[:4])
+	log.Info("eth handshake ok",
+		"peer", shortID,
+		"client_name", clientName,
+		"client_version", clientVersion,
+		"eth_version", version,
+		"head", headLog,
+		"remote", remoteAddr,
+	)
+	h.storePeerEvent(p, "handshake_ok", int(version), clientName, clientVersion, fmt.Sprintf("version %d head %s peer %x", version, headLog, id[:4]))
+
+	// Report actual direction so connect/disconnect events use p.Inbound().
+	if h.onPeerDir != nil {
+		h.onPeerDir(p.ID(), !p.Inbound())
 	}
 
 	// Read and handle messages until the connection is closed
@@ -445,4 +530,33 @@ func (h *EthHandler) handleGetPooledTx(p *p2p.Peer, msg p2p.Msg, rw p2p.MsgReadW
 	}
 
 	return nil
+}
+
+// storePeerEvent persists a peer lifecycle event for the active collection run.
+// It is guarded by a real runID (> 0); before SetRunContext sets one, events are
+// silently dropped so nothing is written with placeholder values.
+func (h *EthHandler) storePeerEvent(p *p2p.Peer, eventType string, ethVersion int, clientName, clientVersion, detailJSON string) {
+	if h.runID <= 0 {
+		return
+	}
+	peerID := p.ID().String()
+	direction := "outbound"
+	if p.Inbound() {
+		direction = "inbound"
+	}
+	if err := h.storage.StorePeerEvent(
+		h.runID,
+		h.observerID,
+		peerID,
+		eventType,
+		direction,
+		clientName,
+		clientVersion,
+		peerID, // enode as peer id
+		p.RemoteAddr().String(),
+		ethVersion,
+		detailJSON,
+	); err != nil {
+		log.Warn("Failed to store peer event", "peer", p.ID(), "event", eventType, "err", err)
+	}
 }
