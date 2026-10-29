@@ -20,6 +20,8 @@ import (
 	"github.com/kingd/ethereum-dropper-lab/internal/storage"
 )
 
+const decodeFailureLogInterval = 30 * time.Second
+
 // rateLimiter is a simple token bucket limiter for rate limiting events.
 type rateLimiter struct {
 	interval time.Duration
@@ -75,6 +77,13 @@ type EthHandler struct {
 	// observer so connect/disconnect peer events use p.Inbound() rather than
 	// the bootnode set.
 	onPeerDir func(enode.ID, bool)
+
+	// decodeFailures counts msg-code -> cumulative decode failures per message
+	// type, logged every decodeFailureLogInterval. Only strict (single-version)
+	// decodes count: always-invalid frames jump to stored malformed rows.
+	decodeFailures map[uint64]uint64
+	decodeFailMu   sync.Mutex
+	lastDecodeLog  time.Time
 }
 
 // SetPeerDirCallback registers the callback that reports each peer's actual direction.
@@ -91,6 +100,8 @@ func New(sto *storage.Storage, runID int64, observerID string, fetchMode bool, d
 		fetchMode:            fetchMode,
 		txDisseminationEnabled: disseminationEnabled,
 		txReannounceRateLimiter: newRateLimiter(float64(disseminationRateLimit)),
+		decodeFailures: make(map[uint64]uint64),
+		lastDecodeLog:  time.Now(),
 	}
 }
 
@@ -182,7 +193,7 @@ func (h *EthHandler) doHandshake(p *p2p.Peer, rw p2p.MsgReadWriter, version uint
 		NetworkID:       h.networkID,
 		Genesis:         h.genesisHash,
 		ForkID:          forkID,
-		EarliestBlock:   0, // observer has no restricted earliest block
+		EarliestBlock:   h.latestBlock, // observer reports its head as the available range start
 		LatestBlock:     h.latestBlock,
 		LatestBlockHash: h.latestBlockHash,
 	}
@@ -273,7 +284,7 @@ func (h *EthHandler) handle(p *p2p.Peer, rw p2p.MsgReadWriter, version uint) err
 		}
 
 		// Handle the message based on its code
-		if err := h.handleMessage(p, msg, rw); err != nil {
+		if err := h.handleMessage(p, msg, rw, version); err != nil {
 			log.Error("Failed to handle eth message", "err", err, "peer", p.ID())
 			// We might want to disconnect on certain errors, but for now just log
 			// In a real implementation, we'd follow go-ethereum's error handling
@@ -281,8 +292,12 @@ func (h *EthHandler) handle(p *p2p.Peer, rw p2p.MsgReadWriter, version uint) err
 	}
 }
 
-// handleMessage processes a single eth protocol message
-func (h *EthHandler) handleMessage(p *p2p.Peer, msg p2p.Msg, rw p2p.MsgReadWriter) error {
+// handleMessage processes a single eth protocol message. version is the
+// negotiated eth protocol version of THIS peer's protocol instance. Message
+// decoding uses the decoder matching that version — never a lenient
+// try-72-then-71 fallback, so partial decodes (e.g. malformed custody mask)
+// are rejected rather than stored as lenient rows.
+func (h *EthHandler) handleMessage(p *p2p.Peer, msg p2p.Msg, rw p2p.MsgReadWriter, version uint) error {
 	// Decode the message code (first byte after size)
 	var msgCode uint64
 	if err := msg.Decode(&msgCode); err != nil {
@@ -292,16 +307,25 @@ func (h *EthHandler) handleMessage(p *p2p.Peer, msg p2p.Msg, rw p2p.MsgReadWrite
 	// Handle based on message code
 	switch msgCode {
 	case ethprot.NewPooledTransactionHashesMsg:
-		// Try to decode as eth/72 first, if it fails fall back to eth/71
-		var pkt72 ethprot.NewPooledTransactionHashesPacket72
-		if err := msg.Decode(&pkt72); err == nil {
+		// Decode with the decoder matching the negotiated version. Decode
+		// failures are counted per message type; rows are never stored from
+		// a lenient/partial decode.
+		switch version {
+		case ethprot.ETH72:
+			var pkt72 ethprot.NewPooledTransactionHashesPacket72
+			if err := msg.Decode(&pkt72); err != nil {
+				return h.decodeFailure(p, ethprot.NewPooledTransactionHashesMsg, version, err)
+			}
 			return h.handleNewPooledTxHashes72(p, &pkt72, rw)
+		case ethprot.ETH71, ethprot.ETH70, ethprot.ETH69:
+			var pkt71 ethprot.NewPooledTransactionHashesPacket71
+			if err := msg.Decode(&pkt71); err != nil {
+				return h.decodeFailure(p, ethprot.NewPooledTransactionHashesMsg, version, err)
+			}
+			return h.handleNewPooledTxHashes(p, &pkt71, rw)
+		default:
+			return fmt.Errorf("unsupported eth protocol version %d for NewPooledTransactionHashes", version)
 		}
-		var pkt71 ethprot.NewPooledTransactionHashesPacket71
-		if err := msg.Decode(&pkt71); err != nil {
-			return fmt.Errorf("failed to decode NewPooledTransactionHashes: %w", err)
-		}
-		return h.handleNewPooledTxHashes(p, &pkt71, rw)
 	case ethprot.TransactionsMsg:
 		return h.handleTransactions(p, msg, rw)
 	case ethprot.PooledTransactionsMsg:
@@ -314,6 +338,21 @@ func (h *EthHandler) handleMessage(p *p2p.Peer, msg p2p.Msg, rw p2p.MsgReadWrite
 		// We should respond with empty in passive mode, or serve data in fetch mode
 		// For now, we'll implement honest empty responses
 		return h.handleGetPooledTx(p, msg, rw)
+	case ethprot.GetBlockHeadersMsg:
+		// Observer is receive-only; respond with an empty BlockHeaders packet
+		// (RequestId echoed) so peers don't stall waiting.
+		// File:line sending a valid empty response: internal/observer/ethhandler/handler.go:handleGetBlockHeaders.
+		return h.handleGetBlockHeaders(p, msg, rw)
+	case ethprot.GetBlockBodiesMsg:
+		// Observer is receive-only; respond with an empty BlockBodies packet
+		// (RequestId echoed) so peers don't stall waiting.
+		// File:line sending a valid empty response: internal/observer/ethhandler/handler.go:handleGetBlockBodies.
+		return h.handleGetBlockBodies(p, msg, rw)
+	case ethprot.GetReceiptsMsg:
+		// Observer is receive-only; respond with an empty Receipts packet
+		// (RequestId echoed) so peers don't stall waiting.
+		// File:line sending a valid empty response: internal/observer/ethhandler/handler.go:handleGetReceipts.
+		return h.handleGetReceipts(p, msg, rw)
 	default:
 		// Ignore unknown messages
 		return nil
@@ -560,3 +599,119 @@ func (h *EthHandler) storePeerEvent(p *p2p.Peer, eventType string, ethVersion in
 		log.Warn("Failed to store peer event", "peer", p.ID(), "event", eventType, "err", err)
 	}
 }
+
+// decodeFailure records a strict per-version decode failure for msgCode at the
+// given version, logs it once at most every decodeFailureLogInterval, and
+// returns the failure as an error. The caller never stores rows from a
+// lenient/partial decode.
+func (h *EthHandler) decodeFailure(p *p2p.Peer, msgCode uint64, version uint, err error) error {
+	msgName := ethMessageName(msgCode)
+	h.decodeFailMu.Lock()
+	h.decodeFailures[msgCode]++
+	count := h.decodeFailures[msgCode]
+	now := time.Now()
+	shouldLog := now.Sub(h.lastDecodeLog) >= decodeFailureLogInterval
+	h.decodeFailMu.Unlock()
+
+	if shouldLog {
+		h.decodeFailMu.Lock()
+		h.lastDecodeLog = now
+		h.decodeFailMu.Unlock()
+		log.Warn("eth message decode failures", "msg", msgName, "code", msgCode,
+			"version", version, "failures", count, "err", err)
+	}
+
+	return fmt.Errorf("failed to decode %s (version %d): %w", msgName, version, err)
+}
+
+// ethMessageName returns a short name for an eth message code.
+func ethMessageName(msgCode uint64) string {
+	switch msgCode {
+	case ethprot.StatusMsg:
+		return "Status"
+	case ethprot.NewBlockHashesMsg:
+		return "NewBlockHashes"
+	case ethprot.TransactionsMsg:
+		return "Transactions"
+	case ethprot.GetBlockHeadersMsg:
+		return "GetBlockHeaders"
+	case ethprot.BlockHeadersMsg:
+		return "BlockHeaders"
+	case ethprot.GetBlockBodiesMsg:
+		return "GetBlockBodies"
+	case ethprot.BlockBodiesMsg:
+		return "BlockBodies"
+	case ethprot.NewBlockMsg:
+		return "NewBlock"
+	case ethprot.NewPooledTransactionHashesMsg:
+		return "NewPooledTransactionHashes"
+	case ethprot.GetPooledTransactionsMsg:
+		return "GetPooledTransactions"
+	case ethprot.PooledTransactionsMsg:
+		return "PooledTransactions"
+	case ethprot.GetReceiptsMsg:
+		return "GetReceipts"
+	case ethprot.ReceiptsMsg:
+		return "Receipts"
+	case ethprot.BlockRangeUpdateMsg:
+		return "BlockRangeUpdate"
+	case ethprot.GetBlockAccessListsMsg:
+		return "GetBlockAccessLists"
+	case ethprot.BlockAccessListsMsg:
+		return "BlockAccessLists"
+	case ethprot.GetCellsMsg:
+		return "GetCells"
+	case ethprot.CellsMsg:
+		return "Cells"
+	default:
+		return fmt.Sprintf("code_%d", msgCode)
+	}
+}
+// handleGetBlockHeaders responds to GetBlockHeaders (0x03) with an empty
+// BlockHeaders sheet packet echoing RequestId. Observer sends a valid empty
+// response rather than ignoring the request so peers don't stall waiting.
+// File:line sending a valid empty response: internal/observer/ethhandler/handler.go:handleGetBlockHeaders.
+func (h *EthHandler) handleGetBlockHeaders(p *p2p.Peer, msg p2p.Msg, rw p2p.MsgReadWriter) error {
+	var pkt ethprot.GetBlockHeadersPacket
+	if err := msg.Decode(&pkt); err != nil {
+		return fmt.Errorf("failed to decode GetBlockHeaders: %w", err)
+	}
+	resp := ethprot.BlockHeadersPacket{RequestId: pkt.RequestId}
+	if err := p2p.Send(rw, ethprot.BlockHeadersMsg, &resp); err != nil {
+		return fmt.Errorf("failed to send empty BlockHeaders: %w", err)
+	}
+	return nil
+}
+
+// handleGetBlockBodies responds to GetBlockBodies (0x05) with an empty
+// BlockBodies sheet packet echoing RequestId. Observer sends a valid empty
+// response rather than ignoring the request so peers don't stall waiting.
+// File:line sending a valid empty response: internal/observer/ethhandler/handler.go:handleGetBlockBodies.
+func (h *EthHandler) handleGetBlockBodies(p *p2p.Peer, msg p2p.Msg, rw p2p.MsgReadWriter) error {
+	var pkt ethprot.GetBlockBodiesPacket
+	if err := msg.Decode(&pkt); err != nil {
+		return fmt.Errorf("failed to decode GetBlockBodies: %w", err)
+	}
+	resp := ethprot.BlockBodiesPacket{RequestId: pkt.RequestId}
+	if err := p2p.Send(rw, ethprot.BlockBodiesMsg, &resp); err != nil {
+		return fmt.Errorf("failed to send empty BlockBodies: %w", err)
+	}
+	return nil
+}
+
+// handleGetReceipts responds to GetReceipts (0x0f) with an empty Receipts
+// packet echoing RequestId. Observer sends a valid empty response rather than
+// ignoring the request so peers don't stall waiting.
+// File:line sending a valid empty response: internal/observer/ethhandler/handler.go:handleGetReceipts.
+func (h *EthHandler) handleGetReceipts(p *p2p.Peer, msg p2p.Msg, rw p2p.MsgReadWriter) error {
+	var pkt ethprot.GetReceiptsPacket69
+	if err := msg.Decode(&pkt); err != nil {
+		return fmt.Errorf("failed to decode GetReceipts: %w", err)
+	}
+	resp := ethprot.ReceiptsResponse(nil)
+	if err := p2p.Send(rw, ethprot.ReceiptsMsg, &resp); err != nil {
+		return fmt.Errorf("failed to send empty Receipts: %w", err)
+	}
+	return nil
+}
+

@@ -2,6 +2,8 @@ package observer
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -19,11 +21,14 @@ import (
 	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/p2p/nat"
 	"github.com/ethereum/go-ethereum/params"
+	"runtime/debug"
 
 	"github.com/kingd/ethereum-dropper-lab/internal/config"
 	"github.com/kingd/ethereum-dropper-lab/internal/observer/ethhandler"
 	"github.com/kingd/ethereum-dropper-lab/internal/storage"
 )
+
+const chainRefreshInterval = 60 * time.Second
 
 // rateLimiter is a simple token bucket limiter for rate limiting events.
 type rateLimiter struct {
@@ -131,6 +136,8 @@ func (o *Observer) Start(ctx context.Context) error {
 		"no_discovery", o.cfg.NoDiscovery,
 		"nat", o.cfg.NAT,
 		"mode", o.cfg.Mode,
+		"tx_dissemination_enabled", o.cfg.TxDisseminationEnabled,
+		"tx_dissemination_rate_limit", o.cfg.TxDisseminationRateLimit,
 		"storage_path", o.cfg.StoragePath,
 		"bootnodes_total", len(o.cfg.Bootnodes),
 		"bootnodes_parsed", bootnodesOK,
@@ -138,6 +145,21 @@ func (o *Observer) Start(ctx context.Context) error {
 		"static_nodes_total", len(o.cfg.StaticNodes),
 		"static_nodes_parsed", staticNodesOK,
 		"static_nodes_skipped", staticNodesSkipped,
+	)
+
+	// Populate run metadata from the build (collector_git_commit) and the
+	// actual config bytes (config_hash = sha256 of config file), logging
+	// both at startup per review requirement D/E.
+	configFile := "configs/real_run.json"
+	o.cfg.CollectorGitCommit = gitCommit()
+	o.cfg.ConfigHash = configHash(configFile)
+	log.Info("Observer metadata",
+		"config_file", configFile,
+		"collector_git_commit", o.cfg.CollectorGitCommit,
+		"config_hash", o.cfg.ConfigHash,
+		"go_version", o.cfg.GoBuildVersion,
+		"geth_lib_version", o.cfg.GethLibVersion,
+		"observer_id", o.cfg.ObserverID,
 	)
 
 	// Start a collection run row and record runID for labeling observation output
@@ -203,6 +225,10 @@ func (o *Observer) Start(ctx context.Context) error {
 				if !ok {
 					return
 				}
+				// Cache actual direction (p.Inbound()) at p2p add time so that
+				// connect/disconnect rows use the peer's real direction even if
+				// it never completed the eth handshake (e.g. refused peers).
+				o.updatePeerDir(ev)
 				if err := o.logAndStorePeerEvent(runID, ev); err != nil {
 					log.Warn("Failed to persist peer event", "err", err)
 				}
@@ -470,10 +496,13 @@ func parseNode(s string) (*enode.Node, error) {
 // Status handshake contents (network ID, genesis hash, ForkID, latest block),
 // labelled EXTERNAL per Point 1. The ForkID is computed from the live head
 // fetched via RPC.
-func (o *Observer) logStatusHandshake(ctx context.Context) error {
+// fetchChainInfo dials the Status RPC endpoint and returns the live genesis
+// block and head header. Uses a per-call timeout so a stalled RPC never hangs
+// the observer.
+func (o *Observer) fetchChainInfo(ctx context.Context) (*types.Block, *types.Header, error) {
 	rpcEndpoint := o.cfg.StatusRPCEndpoint
 	if rpcEndpoint == "" {
-		return nil // nothing to log without an RPC endpoint
+		return nil, nil, nil // nothing to fetch without an RPC endpoint
 	}
 
 	timeout := o.cfg.StatusRPCTimeout
@@ -485,21 +514,34 @@ func (o *Observer) logStatusHandshake(ctx context.Context) error {
 
 	client, err := ethclient.Dial(rpcEndpoint)
 	if err != nil {
-		return fmt.Errorf("failed to dial RPC: %w", err)
+		return nil, nil, fmt.Errorf("failed to dial RPC: %w", err)
 	}
 	defer client.Close()
 
-	// Fetch the live genesis block header (block 0) and head block.
 	genesisHeader, err := client.HeaderByNumber(rpcCtx, big.NewInt(0))
 	if err != nil {
-		return fmt.Errorf("failed to get genesis block: %w", err)
+		return nil, nil, fmt.Errorf("failed to get genesis block: %w", err)
 	}
 	head, err := client.HeaderByNumber(rpcCtx, nil)
 	if err != nil {
-		return fmt.Errorf("failed to get head block: %w", err)
+		return nil, nil, fmt.Errorf("failed to get head block: %w", err)
 	}
 
-	genesis := types.NewBlockWithHeader(genesisHeader)
+	return types.NewBlockWithHeader(genesisHeader), head, nil
+}
+
+// logStatusHandshake fetches the live head block via RPC and logs the eth
+// Status handshake contents (network ID, genesis hash, ForkID, latest block),
+// labelled EXTERNAL per Point 1, then threads the metadata into the eth
+// handler. Runs once at startup.
+func (o *Observer) logStatusHandshake(ctx context.Context) error {
+	genesis, head, err := o.fetchChainInfo(ctx)
+	if err != nil {
+		return err
+	}
+	if genesis == nil {
+		return nil // no RPC endpoint configured
+	}
 
 	forkID := forkid.NewID(params.MainnetChainConfig, genesis, head.Number.Uint64(), head.Time)
 
@@ -511,7 +553,7 @@ func (o *Observer) logStatusHandshake(ctx context.Context) error {
 		"latest_block_number", head.Number.Uint64(),
 		"latest_block_hash", head.Hash().Hex(),
 		"head_timestamp", head.Time,
-		"rpc_endpoint", rpcEndpoint,
+		"rpc_endpoint", o.cfg.StatusRPCEndpoint,
 	)
 
 	// Thread the live chain metadata into the eth handler so every peer
@@ -526,6 +568,91 @@ func (o *Observer) logStatusHandshake(ctx context.Context) error {
 	)
 
 	return nil
+}
+
+// refreshChainInfo refreshes the live head block via RPC every
+// chainRefreshInterval and re-threads it into the eth handler so subsequent
+// eth Status handshakes report EarliestBlock = LatestBlock = head instead of
+// a stale value. Runs until ctx is cancelled (Task C).
+func (o *Observer) refreshChainInfo(ctx context.Context) {
+	ticker := time.NewTicker(chainRefreshInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			genesis, head, err := o.fetchChainInfo(ctx)
+			if err != nil {
+				log.Warn("Chain info refresh failed", "err", err)
+				continue
+			}
+			if genesis == nil {
+				continue
+			}
+			o.ethHandler.SetChainInfo(
+				params.MainnetChainConfig.ChainID.Uint64(),
+				genesis,
+				head.Number.Uint64(),
+				head.Hash(),
+				head.Time,
+			)
+			log.Info("Chain info refreshed from RPC",
+				"latest_block_number", head.Number.Uint64(),
+				"latest_block_hash", head.Hash().Hex(),
+				"head_timestamp", head.Time,
+			)
+		}
+	}
+}
+
+// gitCommit returns the VCS revision of this build, suffixed with "+dirty" if
+// the working tree has uncommitted changes, using debug.ReadBuildInfo.
+func gitCommit() string {
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "unknown"
+	}
+	for _, s := range bi.Settings {
+		if s.Key == "vcs.revision" {
+			rev := s.Value
+			for _, m := range bi.Settings {
+				if m.Key == "vcs.modified" && m.Value == "true" {
+					return rev + "+dirty"
+				}
+			}
+			return rev
+		}
+	}
+	return "unknown"
+}
+
+// configHash returns the sha256 hex digest of the config file at path.
+func configHash(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// updatePeerDir caches p.Inbound() for ev.Peer by looking up the peer in
+// o.server.Peers(). Discovery-dialed peers are outbound (!Inbound), correcting
+// the bootnode-set mislabeling. Runs on every peer event while the peer is
+// still present in the server peer set.
+func (o *Observer) updatePeerDir(ev *p2p.PeerEvent) {
+	if o.server == nil {
+		return
+	}
+	for _, peer := range o.server.Peers() {
+		if peer.ID() == ev.Peer {
+			o.peerDirMu.Lock()
+			o.peerDir[ev.Peer] = !peer.Inbound() // true = outbound (dialed)
+			o.peerDirMu.Unlock()
+			return
+		}
+	}
 }
 
 // rowCounts returns the number of peer_events and transaction_observations
