@@ -298,33 +298,36 @@ func (h *EthHandler) handle(p *p2p.Peer, rw p2p.MsgReadWriter, version uint) err
 // try-72-then-71 fallback, so partial decodes (e.g. malformed custody mask)
 // are rejected rather than stored as lenient rows.
 func (h *EthHandler) handleMessage(p *p2p.Peer, msg p2p.Msg, rw p2p.MsgReadWriter, version uint) error {
-	// Decode the message code (first byte after size)
-	var msgCode uint64
-	if err := msg.Decode(&msgCode); err != nil {
-		return fmt.Errorf("failed to decode message code: %w", err)
-	}
-
-	// Handle based on message code
-	switch msgCode {
+	// Dispatch on msg.Code, which the p2p layer delivered decoded. We do NOT
+	// decode the payload as a uint64 code: that misreads the first field of
+	// every eth packet (e.g. the type list of an announcement) as a code,
+	// producing "expected input string or byte for uint64" on every peer's
+	// first message.
+	switch msg.Code {
 	case ethprot.NewPooledTransactionHashesMsg:
 		// Decode with the decoder matching the negotiated version. Decode
 		// failures are counted per message type; rows are never stored from
-		// a lenient/partial decode.
+		// a lenient/partial decode. One undecodable message must not kill the
+		// connection, so we discard, count, log, and return nil.
 		switch version {
 		case ethprot.ETH72:
 			var pkt72 ethprot.NewPooledTransactionHashesPacket72
 			if err := msg.Decode(&pkt72); err != nil {
+				msg.Discard()
 				return h.decodeFailure(p, ethprot.NewPooledTransactionHashesMsg, version, err)
 			}
 			return h.handleNewPooledTxHashes72(p, &pkt72, rw)
 		case ethprot.ETH71, ethprot.ETH70, ethprot.ETH69:
 			var pkt71 ethprot.NewPooledTransactionHashesPacket71
 			if err := msg.Decode(&pkt71); err != nil {
+				msg.Discard()
 				return h.decodeFailure(p, ethprot.NewPooledTransactionHashesMsg, version, err)
 			}
 			return h.handleNewPooledTxHashes(p, &pkt71, rw)
 		default:
-			return fmt.Errorf("unsupported eth protocol version %d for NewPooledTransactionHashes", version)
+			msg.Discard()
+			return h.decodeFailure(p, ethprot.NewPooledTransactionHashesMsg, version,
+				fmt.Errorf("unsupported eth protocol version %d for NewPooledTransactionHashes", version))
 		}
 	case ethprot.TransactionsMsg:
 		return h.handleTransactions(p, msg, rw)
@@ -333,6 +336,7 @@ func (h *EthHandler) handleMessage(p *p2p.Peer, msg p2p.Msg, rw p2p.MsgReadWrite
 			return h.handlePooledTxResponse(p, msg, rw)
 		}
 		// In passive mode, we ignore PooledTransactions unless fetch mode is enabled
+		msg.Discard()
 		return nil
 	case ethprot.GetPooledTransactionsMsg:
 		// We should respond with empty in passive mode, or serve data in fetch mode
@@ -351,17 +355,31 @@ func (h *EthHandler) handleMessage(p *p2p.Peer, msg p2p.Msg, rw p2p.MsgReadWrite
 	case ethprot.GetReceiptsMsg:
 		// Observer is receive-only; respond with an empty Receipts packet
 		// (RequestId echoed) so peers don't stall waiting.
-		// File:line sending a valid empty response: internal/observer/ethhandler/handler.go:handleGetReceipts.
+		// File:line where we send a valid empty response: internal/observer/ethhandler/handler.go:handleGetReceipts.
 		return h.handleGetReceipts(p, msg, rw)
+	case ethprot.GetBlockAccessListsMsg:
+		// New in eth/70-72 (DA/access-list messages). Observer is
+		// receive-only; respond with an empty block access lists packet.
+		// File:line sending a valid empty response: internal/observer/ethhandler/handler.go:handleGetBlockAccessLists.
+		return h.handleGetBlockAccessLists(p, msg, rw)
+	case ethprot.GetCellsMsg:
+		// New in eth/70-72 (cell-based blob data availability). Observer is
+		// receive-only; respond with an empty Cells packet echoing RequestId.
+		// File:line sending a valid empty response: internal/observer/ethhandler/handler.go:handleGetCells.
+		return h.handleGetCells(p, msg, rw)
 	default:
-		// Ignore unknown messages
+		// Unknown or unwanted message: discard payload and continue.
+		msg.Discard()
 		return nil
 	}
 }
 
-// handleNewPooledTxHashes processes NewPooledTransactionHashes (0x08) message for eth/71
+// handleNewPooledTxHashes processes NewPooledTransactionHashes (0x08) message for eth/71.
+// All observations for a single message are written in one database transaction
+// via StoreTxObservations (one transaction per message).
 func (h *EthHandler) handleNewPooledTxHashes(p *p2p.Peer, pkt *ethprot.NewPooledTransactionHashesPacket71, rw p2p.MsgReadWriter) error {
-	// Store observations for each hash
+	peerID := p.ID().String()
+	obs := make([]storage.BatchTxObservation, 0, len(pkt.Hashes))
 	for i := 0; i < len(pkt.Hashes); i++ {
 		hash := pkt.Hashes[i]
 
@@ -378,10 +396,27 @@ func (h *EthHandler) handleNewPooledTxHashes(p *p2p.Peer, pkt *ethprot.NewPooled
 			announcedSize = pkt.Sizes[i]
 		}
 
-		// Store the observation
-		if err := h.storage.StoreTxObservation(h.runID, h.observerID, p.ID().String(), hashBytes, uint64(ethprot.NewPooledTransactionHashesMsg), txType, announcedSize, nil, true, nil); err != nil {
-			return fmt.Errorf("failed to store tx observation: %w", err)
-		}
+		obs = append(obs, storage.BatchTxObservation{
+			RunID:            h.runID,
+			ObserverID:       h.observerID,
+			PeerID:           peerID,
+			TxHash:           hashBytes,
+			MsgType:          uint64(ethprot.NewPooledTransactionHashesMsg),
+			TxType:           txType,
+			AnnouncedSize:    announcedSize,
+			RawTx:            nil,
+			IsAnnouncement:   true,
+			CustodyMask:      nil,
+			EthVersion:       72,
+			SourceConfidence: "direct",
+		})
+	}
+	if err := h.storage.StoreTxObservations(obs); err != nil {
+		return fmt.Errorf("failed to store tx observations: %w", err)
+	}
+
+	for i := 0; i < len(pkt.Hashes); i++ {
+		hash := pkt.Hashes[i]
 
 		// If dissemination is enabled, try to reannounce the transaction
 		if h.txDisseminationEnabled && h.txReannounceRateLimiter.take() {
@@ -403,9 +438,12 @@ func (h *EthHandler) handleNewPooledTxHashes(p *p2p.Peer, pkt *ethprot.NewPooled
 	return nil
 }
 
-// handleNewPooledTxHashes72 processes NewPooledTransactionHashes (0x08) message for eth/72
+// handleNewPooledTxHashes72 processes NewPooledTransactionHashes (0x08) message for eth/72.
+// All observations for a single message are written in one database transaction
+// via StoreTxObservations (one transaction per message).
 func (h *EthHandler) handleNewPooledTxHashes72(p *p2p.Peer, pkt *ethprot.NewPooledTransactionHashesPacket72, rw p2p.MsgReadWriter) error {
-	// Store observations for each hash
+	peerID := p.ID().String()
+	obs := make([]storage.BatchTxObservation, 0, len(pkt.Hashes))
 	for i := 0; i < len(pkt.Hashes); i++ {
 		hash := pkt.Hashes[i]
 
@@ -422,20 +460,33 @@ func (h *EthHandler) handleNewPooledTxHashes72(p *p2p.Peer, pkt *ethprot.NewPool
 			announcedSize = pkt.Sizes[i]
 		}
 
+		var custodyMaskBytes []byte
 		// For eth/72, we also have a custody mask
 		if pkt.Mask != (types.CustodyBitmap{}) {
-			// Convert custody mask to bytes - it's a [16]byte array
-			custodyMaskBytes := pkt.Mask[:]
-			// Store the observation
-			if err := h.storage.StoreTxObservation(h.runID, h.observerID, p.ID().String(), hashBytes, uint64(ethprot.NewPooledTransactionHashesMsg), txType, announcedSize, nil, true, custodyMaskBytes); err != nil {
-				return fmt.Errorf("failed to store tx observation: %w", err)
-			}
-		} else {
-			// Store the observation with nil custody mask
-			if err := h.storage.StoreTxObservation(h.runID, h.observerID, p.ID().String(), hashBytes, uint64(ethprot.NewPooledTransactionHashesMsg), txType, announcedSize, nil, true, nil); err != nil {
-				return fmt.Errorf("failed to store tx observation: %w", err)
-			}
+			custodyMaskBytes = pkt.Mask[:]
 		}
+
+		obs = append(obs, storage.BatchTxObservation{
+			RunID:            h.runID,
+			ObserverID:       h.observerID,
+			PeerID:           peerID,
+			TxHash:           hashBytes,
+			MsgType:          uint64(ethprot.NewPooledTransactionHashesMsg),
+			TxType:           txType,
+			AnnouncedSize:    announcedSize,
+			RawTx:            nil,
+			IsAnnouncement:   true,
+			CustodyMask:      custodyMaskBytes,
+			EthVersion:       72,
+			SourceConfidence: "direct",
+		})
+	}
+	if err := h.storage.StoreTxObservations(obs); err != nil {
+		return fmt.Errorf("failed to store tx observations: %w", err)
+	}
+
+	for i := 0; i < len(pkt.Hashes); i++ {
+		hash := pkt.Hashes[i]
 
 		// If dissemination is enabled, try to reannounce the transaction
 		if h.txDisseminationEnabled && h.txReannounceRateLimiter.take() {
@@ -715,3 +766,35 @@ func (h *EthHandler) handleGetReceipts(p *p2p.Peer, msg p2p.Msg, rw p2p.MsgReadW
 	return nil
 }
 
+
+// handleGetBlockAccessLists responds to GetBlockAccessLists (0x12) with an
+// empty BlockAccessListPacket echoing RequestId. Observer sends a valid empty
+// response rather than ignoring the request so peers don't stall waiting.
+// File:line sending a valid empty response: internal/observer/ethhandler/handler.go:handleGetBlockAccessLists.
+func (h *EthHandler) handleGetBlockAccessLists(p *p2p.Peer, msg p2p.Msg, rw p2p.MsgReadWriter) error {
+	var pkt ethprot.GetBlockAccessListsPacket
+	if err := msg.Decode(&pkt); err != nil {
+		return fmt.Errorf("failed to decode GetBlockAccessLists: %w", err)
+	}
+	resp := ethprot.BlockAccessListPacket{RequestId: pkt.RequestId}
+	if err := p2p.Send(rw, ethprot.BlockAccessListsMsg, &resp); err != nil {
+		return fmt.Errorf("failed to send empty BlockAccessLists: %w", err)
+	}
+	return nil
+}
+
+// handleGetCells responds to GetCells (0x14) with an empty Cells packet
+// echoing RequestId. Observer sends a valid empty response rather than
+// ignoring the request so peers don't stall waiting.
+// File:line sending a valid empty response: internal/observer/ethhandler/handler.go:handleGetCells.
+func (h *EthHandler) handleGetCells(p *p2p.Peer, msg p2p.Msg, rw p2p.MsgReadWriter) error {
+	var pkt ethprot.GetCellsRequestPacket
+	if err := msg.Decode(&pkt); err != nil {
+		return fmt.Errorf("failed to decode GetCells: %w", err)
+	}
+	resp := ethprot.CellsPacket{RequestId: pkt.RequestId}
+	if err := p2p.Send(rw, ethprot.CellsMsg, &resp); err != nil {
+		return fmt.Errorf("failed to send empty Cells: %w", err)
+	}
+	return nil
+}

@@ -340,6 +340,109 @@ func (s *Storage) StoreTxObservation(runID int64, observerID string, peerID stri
 	return nil
 }
 
+// BatchTxObservation bundles all fields for a single transaction observation insert,
+// used by StoreTxObservations which writes a whole message's worth in one tx.
+type BatchTxObservation struct {
+	RunID             int64
+	ObserverID       string
+	PeerID           string
+	TxHash           []byte
+	MsgType         uint64
+	TxType          uint8
+	AnnouncedSize   uint32
+	RawTx           []byte
+	IsAnnouncement  bool
+	CustodyMask     []byte
+	EthVersion      int
+	SourceConfidence string
+}
+
+// StoreTxObservations persists multiple transaction observations in a single
+// database transaction (one transaction per message). This batches what would
+// otherwise be one db.Exec per observation into one INSERT ... VALUES per row
+// inside one transaction, matching "one transaction per message".
+func (s *Storage) StoreTxObservations(obs []BatchTxObservation) error {
+	if len(obs) == 0 {
+		return nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin tx for batch obs insert: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`
+		INSERT INTO transaction_observations (
+			run_id, observer_id, peer_id, tx_hash, timestamp_ns,
+			message_type, eth_version, tx_type, announced_size,
+			raw_transaction, source_confidence, custody_mask
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to prepare batch obs insert: %w", err)
+	}
+	defer stmt.Close()
+
+	now := time.Now().UnixNano()
+	for _, o := range obs {
+		msgTypeStr := msgTypeToStr(o.MsgType)
+		_, err = stmt.Exec(
+			o.RunID,
+			o.ObserverID,
+			o.PeerID,
+			o.TxHash,
+			now,
+			msgTypeStr,
+			o.EthVersion,
+			o.TxType,
+			o.AnnouncedSize,
+			o.RawTx,
+			o.SourceConfidence,
+			o.CustodyMask,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to store tx observation: %w", err)
+		}
+
+		// Also insert into tracked_transactions if not already present.
+		initialDelay := int64(time.Second)
+		_, err = tx.Exec(`
+			INSERT OR IGNORE INTO tracked_transactions (
+				tx_hash, first_seen_ns, last_checked_ns, next_check_ns, attempt
+			) VALUES (?, ?, ?, ?, ?)
+		`,
+			o.TxHash,
+			now,
+			now,
+			now + initialDelay,
+			0,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to insert into tracked_transactions: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit batch obs insert: %w", err)
+	}
+	return nil
+}
+
+// msgTypeToStr converts an eth message code to the message_type string.
+func msgTypeToStr(msgType uint64) string {
+	switch msgType {
+	case ethprot.NewPooledTransactionHashesMsg:
+		return "announcement"
+	case ethprot.TransactionsMsg:
+		return "direct_broadcast"
+	case ethprot.PooledTransactionsMsg:
+		return "pooled_tx_response"
+	default:
+		return "unknown"
+	}
+}
+
 // StorePeerEvent saves a peer lifecycle event.
 // runID and observerID come from the active collection run (labelled by data_label in collection_runs).
 func (s *Storage) StorePeerEvent(runID int64, observerID string, peerID string, eventType string, direction string, clientName string, clientVersion string, enode string, remoteAddr string, ethVersion int, detailJSON string) error {
