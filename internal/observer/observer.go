@@ -262,6 +262,11 @@ func (o *Observer) Start(ctx context.Context) error {
 		log.Warn("Could not set collection run end time", "run_id", runID, "err", err)
 	}
 
+	// Persist final observed/stored/dropped counters to collection_runs at shutdown
+	if err := o.storage.PersistFinalCounts(runID); err != nil {
+		log.Warn("Could not persist final observation counts", "run_id", runID, "err", err)
+	}
+
 	// Wait for goroutines to finish
 	o.wg.Wait()
 
@@ -294,8 +299,9 @@ func (o *Observer) setupLogLevel() {
 	log.Info("Log level configured", "level", level)
 }
 
-// statsLogger logs a one-line Info summary every 30s: peer count, rows written
-// to peer_events and transaction_observations since start, and uptime.
+// statsLogger logs a one-line Info summary every 30s: peer count, observation
+// counters (observed/stored/dropped) from storage, and uptime. Logs WARN when
+// any observations have been dropped.
 func (o *Observer) statsLogger() {
 	defer o.wg.Done()
 	ticker := time.NewTicker(30 * time.Second)
@@ -306,13 +312,17 @@ func (o *Observer) statsLogger() {
 			return
 		case <-ticker.C:
 			peerCount := o.server.PeerCount()
-			peerEvCount, txObsCount := o.rowCounts(o.runID)
+			observed, stored, dropped := o.storage.Stats()
 			log.Info("Observer stats",
 				"uptime", time.Since(o.startTime).Truncate(time.Second),
 				"peers", peerCount,
-				"peer_events_written", peerEvCount,
-				"tx_observations_written", txObsCount,
+				"observations_observed", observed,
+				"observations_stored", stored,
+				"observations_dropped", dropped,
 			)
+			if dropped > 0 {
+				log.Warn("Observations have been dropped", "dropped", dropped)
+			}
 		}
 	}
 }

@@ -52,6 +52,10 @@ type CollectionRun struct {
 	Mode             string // passive, fetch
 	DataLabel        string // MAINNET_OBSERVATION, LOCAL_TESTNET, CONTROLLED_SIMULATION
 	Notes            string
+	// Counters persisted at shutdown (observed/stored/dropped across the run).
+	ObservedCount uint64
+	StoredCount   uint64
+	DroppedCount  uint64
 }
 
 // TrackedTransaction represents a transaction that we are tracking for inclusion

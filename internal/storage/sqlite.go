@@ -3,10 +3,13 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -14,25 +17,85 @@ import (
 	ethprot "github.com/ethereum/go-ethereum/eth/protocols/eth"
 )
 
-// Storage handles persistence of observations to SQLite
-type Storage struct {
-	db *sql.DB
+// writerBatchSize is the maximum number of write operations the writer goroutine
+// accumulates before forcing a commit, regardless of timer.
+const writerBatchSize = 250
+
+// writerFlushInterval is how often the writer goroutine flushes pending work
+// even if the batch isn't full.
+const writerFlushInterval = 250 * time.Millisecond
+
+// busyRetries is the number of times to retry a SQLITE_BUSY commit before giving up.
+const busyRetries = 3
+
+// writeReq is a single unit of database work enqueued onto the writer channel.
+// The `do` closure runs inside a single database transaction. If `done` is
+// non-nil, the caller blocks on it to learn the result.
+type writeReq struct {
+	do   func(tx *sql.Tx) error
+	done chan error
 }
 
-// DB returns the underlying database connection
+// Storage handles persistence of observations to SQLite.
+//
+// All writes are funneled through a single writer goroutine (see writerLoop).
+// Callers enqueue work via channelSend and never touch s.db directly for writes.
+// Reads (Query/QueryRow) still go straight to s.db, which is fine because SQLite
+// permits one writer at a time and unlimited concurrent readers in WAL mode.
+type Storage struct {
+	db *sql.DB
+
+	// writeCh is the single channel every DB write flows through. Bounded so
+	// producers can't grow memory unboundedly if the writer falls behind.
+	writeCh chan writeReq
+
+	// counters track total observations observed/stored/dropped across the run.
+	observed uint64
+	stored   uint64
+	dropped  uint64
+
+	// closeWriter signals the writer goroutine to stop after draining the channel.
+	closeWriter chan struct{}
+	// writerDone is closed when the writer goroutine has exited.
+	writerDone chan struct{}
+	once       sync.Once // guards Close
+}
+
+// DB returns the underlying database connection, for read-only queries.
 func (s *Storage) DB() *sql.DB {
 	return s.db
 }
 
-// New creates a new Storage instance
+// Observed returns the total observations decoded (observed counter).
+func (s *Storage) Observed() uint64 { return atomic.LoadUint64(&s.observed) }
+
+// Stored returns the total observations successfully stored.
+func (s *Storage) Stored() uint64 { return atomic.LoadUint64(&s.stored) }
+
+// Dropped returns the total observations dropped (queue full or retries exhausted).
+func (s *Storage) Dropped() uint64 { return atomic.LoadUint64(&s.dropped) }
+
+// New creates a new Storage instance.
+//
+// The DSN includes WAL mode, synchronous=NORMAL, and busy_timeout>=10000ms so
+// concurrent readers never block the writer and the writer backs off instead of
+// immediately failing on SQLITE_BUSY.
 func New(dbPath string) (*Storage, error) {
 	// Ensure directory exists
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
 		return nil, fmt.Errorf("failed to create db directory: %w", err)
 	}
 
+	// DSN with WAL, synchronous=NORMAL, busy_timeout. Preserve any existing
+	// query string (e.g. "file::memory:?cache=shared") by appending with "&".
+	sep := "?"
+	if strings.Contains(dbPath, "?") {
+		sep = "&"
+	}
+	dsn := fmt.Sprintf("%s%s_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=10000", dbPath, sep)
+
 	// Open database connection
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -43,32 +106,580 @@ func New(dbPath string) (*Storage, error) {
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
+	// Confirm WAL is active.
+	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to set WAL mode: %w", err)
+	}
+
 	// Initialize schema
 	if err := initSchema(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to initialize schema: %w", err)
 	}
 
-	// Set WAL mode for better concurrency
-	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to set WAL mode: %w", err)
-	}
+	// One writer goroutine owns all writes. SetMaxOpenConns(1) guarantees the
+	// sql layer never hands out more than one connection, so we can never have
+	// two concurrent writers fighting for the DB lock.
+	db.SetMaxOpenConns(1)
 
-	return &Storage{db: db}, nil
+	s := &Storage{
+		db:          db,
+		writeCh:     make(chan writeReq, writerBatchSize*4),
+		closeWriter: make(chan struct{}),
+		writerDone:  make(chan struct{}),
+	}
+	go s.writerLoop()
+	return s, nil
 }
 
-// Close closes the database connection
+// Close waits for the writer to drain and finish, then closes the database.
 func (s *Storage) Close() error {
+	s.once.Do(func() {
+		close(s.closeWriter)
+		<-s.writerDone
+	})
 	if s.db != nil {
 		return s.db.Close()
 	}
 	return nil
 }
 
-// initSchema creates the necessary tables if they don't exist
+// channelSend enqueues a write request onto the writer channel. If the channel
+// is full, the observation is counted as dropped and the caller gets
+// ErrQueueFull. Every write (tx observation, peer event, collection run,
+// heartbeat, end time) goes through here — there is exactly one writer.
+func (s *Storage) channelSend(req writeReq) error {
+	select {
+	case s.writeCh <- req:
+		return nil
+	default:
+		atomic.AddUint64(&s.dropped, 1)
+		return ErrQueueFull
+	}
+}
+
+// ErrQueueFull is returned when the write queue is full and the observation
+// could not be enqueued.
+var ErrQueueFull = errors.New("write queue full")
+
+// writerLoop is the single writer goroutine. It reads from writeCh, batches up
+// to writerBatchSize operations or writerFlushInterval (whichever comes first),
+// and commits them in one transaction. BUSY commits are retried up to busyRetries
+// times with backoff.
+func (s *Storage) writerLoop() {
+	defer close(s.writerDone)
+
+	ticker := time.NewTicker(writerFlushInterval)
+	defer ticker.Stop()
+
+	batch := make([]writeReq, 0, writerBatchSize)
+
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		// Take ownership of the batch so done is signaled on every path.
+		batchCopy := batch
+		batch = batch[:0]
+
+		tx, err := s.db.Begin()
+		if err != nil {
+			s.failBatch(batchCopy, err)
+			return fmt.Errorf("failed to begin tx for batch write: %w", err)
+		}
+		for _, req := range batchCopy {
+			if err := req.do(tx); err != nil {
+				tx.Rollback()
+				s.failBatch(batchCopy, err)
+				return err
+			}
+		}
+		if err := s.commitWithRetry(tx); err != nil {
+			s.failBatch(batchCopy, err)
+			return err
+		}
+		for _, req := range batchCopy {
+			if req.done != nil {
+				req.done <- nil
+			}
+		}
+		atomic.AddUint64(&s.stored, uint64(len(batchCopy)))
+		return nil
+	}
+
+	for {
+		select {
+		case <-s.closeWriter:
+			// Drain remaining items, then exit.
+			close(s.writeCh)
+			for req := range s.writeCh {
+				batch = append(batch, req)
+				if len(batch) >= writerBatchSize {
+					if err := flush(); err != nil {
+						s.logWriterErr(err)
+					}
+				}
+			}
+			if err := flush(); err != nil {
+				s.logWriterErr(err)
+			}
+			return
+
+		case req, ok := <-s.writeCh:
+			if !ok {
+				// channel was closed (closeWriter path above).
+				if err := flush(); err != nil {
+					s.logWriterErr(err)
+				}
+				return
+			}
+			atomic.AddUint64(&s.observed, 1)
+			batch = append(batch, req)
+drain:
+			for len(batch) < writerBatchSize {
+				select {
+				case r, ok := <-s.writeCh:
+					if !ok {
+						// channel closed (closeWriter draining).
+						if err := flush(); err != nil {
+							s.logWriterErr(err)
+						}
+						return
+					}
+					atomic.AddUint64(&s.observed, 1)
+					batch = append(batch, r)
+				default:
+					// channel empty → nothing more to batch right now.
+					break drain
+				}
+			}
+			if err := flush(); err != nil {
+				s.logWriterErr(err)
+			}
+
+		case <-ticker.C:
+			if err := flush(); err != nil {
+				s.logWriterErr(err)
+			}
+		}
+	}
+}
+
+// failBatch sends the given error to every request in the batch that has a
+// done channel, and increments the dropped counter for fire-and-forget requests.
+func (s *Storage) failBatch(batch []writeReq, err error) {
+	for _, req := range batch {
+		if req.done != nil {
+			req.done <- err
+		} else {
+			atomic.AddUint64(&s.dropped, 1)
+		}
+	}
+}
+
+// logWriterErr logs writer errors at Warn level (non-fatal, writer keeps going).
+func (s *Storage) logWriterErr(err error) {
+	log.Warn("Writer batch failed", "err", err)
+}
+
+// commitWithRetry commits tx, retrying SQLITE_BUSY up to busyRetries times with
+// exponential backoff before giving up.
+func (s *Storage) commitWithRetry(tx *sql.Tx) error {
+	var lastErr error
+	for i := 0; i <= busyRetries; i++ {
+		err := tx.Commit()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !isBusyErr(err) {
+			return err
+		}
+		if i < busyRetries {
+			backoff := time.Duration(100*(1<<i)) * time.Millisecond // 100ms, 200ms, 400ms
+			time.Sleep(backoff)
+		}
+	}
+	return fmt.Errorf("commit failed after %d retries (last: %w)", busyRetries+1, lastErr)
+}
+
+// isBusyErr reports whether err is a SQLite BUSY/busy error.
+func isBusyErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "busy") || strings.Contains(msg, "database is locked")
+}
+
+// ---- Write entry points (all enqueue onto writeCh; none touch s.db directly) ----
+
+// StoreTxObservation enqueues a single transaction observation.
+func (s *Storage) StoreTxObservation(runID int64, observerID string, peerID string, txHash []byte, msgType uint64, txType uint8, announcedSize uint32, rawTx []byte, isAnnouncement bool, custodyMask []byte) error {
+	msgTypeStr := msgTypeToStr(msgType)
+	done := make(chan error, 1)
+	req := writeReq{
+		do: func(tx *sql.Tx) error {
+			_, err := tx.Exec(`
+				INSERT INTO transaction_observations (
+					run_id, observer_id, peer_id, tx_hash, timestamp_ns,
+					message_type, eth_version, tx_type, announced_size,
+					raw_transaction, source_confidence, custody_mask
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`,
+				runID,
+				observerID,
+				peerID,
+				txHash,
+				time.Now().UnixNano(),
+				msgTypeStr,
+				72, // eth_version - placeholder
+				txType,
+				announcedSize,
+				rawTx,
+				"direct",
+				custodyMask,
+			)
+			if err != nil {
+				return fmt.Errorf("failed to store tx observation: %w", err)
+			}
+
+			now := time.Now().UnixNano()
+			_, err = tx.Exec(`
+				INSERT OR IGNORE INTO tracked_transactions (
+					tx_hash, first_seen_ns, last_checked_ns, next_check_ns, attempt
+				) VALUES (?, ?, ?, ?, ?)
+			`,
+				txHash,
+				now,
+				now,
+				now+int64(time.Second),
+				0,
+			)
+			if err != nil {
+				return fmt.Errorf("failed to insert into tracked_transactions: %w", err)
+			}
+			return nil
+		},
+		done: done,
+	}
+	if err := s.channelSend(req); err != nil {
+		return err
+	}
+	return <-done
+}
+
+// StoreTxObservations enqueues a batch of observations as a single transaction.
+func (s *Storage) StoreTxObservations(obs []BatchTxObservation) error {
+	if len(obs) == 0 {
+		return nil
+	}
+	done := make(chan error, 1)
+	req := writeReq{
+		do: func(tx *sql.Tx) error {
+			stmt, err := tx.Prepare(`
+				INSERT INTO transaction_observations (
+					run_id, observer_id, peer_id, tx_hash, timestamp_ns,
+					message_type, eth_version, tx_type, announced_size,
+					raw_transaction, source_confidence, custody_mask
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`)
+			if err != nil {
+				return fmt.Errorf("failed to prepare batch obs insert: %w", err)
+			}
+			defer stmt.Close()
+
+			now := time.Now().UnixNano()
+			for _, o := range obs {
+				msgTypeStr := msgTypeToStr(o.MsgType)
+				_, err = stmt.Exec(
+					o.RunID,
+					o.ObserverID,
+					o.PeerID,
+					o.TxHash,
+					now,
+					msgTypeStr,
+					o.EthVersion,
+					o.TxType,
+					o.AnnouncedSize,
+					o.RawTx,
+					o.SourceConfidence,
+					o.CustodyMask,
+				)
+				if err != nil {
+					return fmt.Errorf("failed to store tx observation: %w", err)
+				}
+
+				_, err = tx.Exec(`
+					INSERT OR IGNORE INTO tracked_transactions (
+						tx_hash, first_seen_ns, last_checked_ns, next_check_ns, attempt
+					) VALUES (?, ?, ?, ?, ?)
+				`,
+					o.TxHash,
+					now,
+					now,
+					now+int64(time.Second),
+					0,
+				)
+				if err != nil {
+					return fmt.Errorf("failed to insert into tracked_transactions: %w", err)
+				}
+			}
+			return nil
+		},
+		done: done,
+	}
+	if err := s.channelSend(req); err != nil {
+		return err
+	}
+	return <-done
+}
+
+// StorePeerEvent enqueues a peer lifecycle event.
+func (s *Storage) StorePeerEvent(runID int64, observerID string, peerID string, eventType string, direction string, clientName string, clientVersion string, enode string, remoteAddr string, ethVersion int, detailJSON string) error {
+	done := make(chan error, 1)
+	req := writeReq{
+		do: func(tx *sql.Tx) error {
+			_, err := tx.Exec(`
+				INSERT INTO peer_events (
+					run_id, observer_id, peer_id, event_type, direction,
+					timestamp_ns, client_name, client_version, enode, remote_addr,
+					eth_version, detail_json
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`,
+				runID,
+				observerID,
+				peerID,
+				eventType,
+				direction,
+				time.Now().UnixNano(),
+				clientName,
+				clientVersion,
+				enode,
+				remoteAddr,
+				ethVersion,
+				detailJSON,
+			)
+			if err != nil {
+				return fmt.Errorf("failed to store peer event: %w", err)
+			}
+			return nil
+		},
+		done: done,
+	}
+	if err := s.channelSend(req); err != nil {
+		return err
+	}
+	return <-done
+}
+
+// StartCollectionRun enqueues a new collection run insert and returns the new run id.
+func (s *Storage) StartCollectionRun(run *CollectionRun) (int64, error) {
+	var runID int64
+	done := make(chan error, 1)
+	req := writeReq{
+		do: func(tx *sql.Tx) error {
+			res, err := tx.Exec(`
+				INSERT INTO collection_runs (
+					start_ns, end_ns, observer_id, geth_lib_version,
+					go_build_version, collector_git_commit, config_hash,
+					schema_version, mode, data_label, notes,
+					observed_count, stored_count, dropped_count
+				) VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0)
+			`,
+				run.StartTime.UnixNano(),
+				run.ObserverID,
+				run.GethLibVersion,
+				run.GoBuildVersion,
+				run.CollectorGitCommit,
+				run.ConfigHash,
+				run.SchemaVersion,
+				run.Mode,
+				run.DataLabel,
+				run.Notes,
+			)
+			if err != nil {
+				return fmt.Errorf("failed to start collection run: %w", err)
+			}
+			id, err := res.LastInsertId()
+			if err != nil {
+				return fmt.Errorf("failed to get last insert id: %w", err)
+			}
+			runID = id
+			return nil
+		},
+		done: done,
+	}
+	if err := s.channelSend(req); err != nil {
+		return 0, err
+	}
+	if err := <-done; err != nil {
+		return 0, err
+	}
+	return runID, nil
+}
+
+// StoreCollectionRun enqueues a full collection run insert.
+func (s *Storage) StoreCollectionRun(run *CollectionRun) error {
+	endNs := int64(0)
+	if !run.EndTime.IsZero() {
+		endNs = run.EndTime.UnixNano()
+	}
+	done := make(chan error, 1)
+	req := writeReq{
+		do: func(tx *sql.Tx) error {
+			_, err := tx.Exec(`
+				INSERT INTO collection_runs (
+					start_ns, end_ns, observer_id, geth_lib_version,
+					go_build_version, collector_git_commit, config_hash,
+					schema_version, mode, data_label, notes,
+					observed_count, stored_count, dropped_count
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`,
+				run.StartTime.UnixNano(),
+				endNs,
+				run.ObserverID,
+				run.GethLibVersion,
+				run.GoBuildVersion,
+				run.CollectorGitCommit,
+				run.ConfigHash,
+				run.SchemaVersion,
+				run.Mode,
+				run.DataLabel,
+				run.Notes,
+				atomic.LoadUint64(&s.observed),
+				atomic.LoadUint64(&s.stored),
+				atomic.LoadUint64(&s.dropped),
+			)
+			if err != nil {
+				return fmt.Errorf("failed to store collection run: %w", err)
+			}
+			return nil
+		},
+		done: done,
+	}
+	if err := s.channelSend(req); err != nil {
+		return err
+	}
+	return <-done
+}
+
+// UpdateCollectionRunEndTime enqueues an update to set end_ns for a run id.
+func (s *Storage) UpdateCollectionRunEndTime(runID int64) error {
+	done := make(chan error, 1)
+	req := writeReq{
+		do: func(tx *sql.Tx) error {
+			_, err := tx.Exec(`
+				UPDATE collection_runs
+				SET end_ns = ?
+				WHERE run_id = ?
+			`, time.Now().UnixNano(), runID)
+			if err != nil {
+				return fmt.Errorf("failed to update collection run end time: %w", err)
+			}
+			return nil
+		},
+		done: done,
+	}
+	if err := s.channelSend(req); err != nil {
+		return err
+	}
+	return <-done
+}
+
+// HeartbeatCollectionRun periodically refreshes end_ns for the given collection
+// run id until ctx is cancelled. All updates go through the single writer.
+func (s *Storage) HeartbeatCollectionRun(ctx context.Context, runID int64) error {
+	ticker := time.NewTicker(HeartbeatInterval)
+	defer ticker.Stop()
+
+	// Do an immediate heartbeat so end_ns is set from the start
+	if err := s.UpdateCollectionRunEndTime(runID); err != nil && !errors.Is(err, context.Canceled) {
+		return fmt.Errorf("initial heartbeat: %w", err)
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if err := s.UpdateCollectionRunEndTime(runID); err != nil {
+				log.Error("Heartbeat failed", "run_id", runID, "err", err)
+				// Non-fatal: keep trying
+			}
+		}
+	}
+}
+
+// Stats returns the current observed/stored/dropped counters plus totals from DB.
+func (s *Storage) Stats() (observed, stored, dropped uint64) {
+	return atomic.LoadUint64(&s.observed), atomic.LoadUint64(&s.stored), atomic.LoadUint64(&s.dropped)
+}
+
+// PersistFinalCounts writes the running counters into the collection_runs row for
+// the given run id. Called at shutdown so the final tally is durably recorded.
+func (s *Storage) PersistFinalCounts(runID int64) error {
+	done := make(chan error, 1)
+	req := writeReq{
+		do: func(tx *sql.Tx) error {
+			_, err := tx.Exec(`
+				UPDATE collection_runs
+				SET observed_count = ?,
+					stored_count = ?,
+					dropped_count = ?
+				WHERE run_id = ?
+			`, atomic.LoadUint64(&s.observed), atomic.LoadUint64(&s.stored), atomic.LoadUint64(&s.dropped), runID)
+			if err != nil {
+				return fmt.Errorf("failed to persist final counts: %w", err)
+			}
+			return nil
+		},
+		done: done,
+	}
+	if err := s.channelSend(req); err != nil {
+		return err
+	}
+	return <-done
+}
+
+// BatchTxObservation bundles all fields for a single transaction observation insert,
+// used by StoreTxObservations which writes a whole message's worth in one tx.
+type BatchTxObservation struct {
+	RunID             int64
+	ObserverID       string
+	PeerID           string
+	TxHash           []byte
+	MsgType         uint64
+	TxType          uint8
+	AnnouncedSize   uint32
+	RawTx           []byte
+	IsAnnouncement  bool
+	CustodyMask     []byte
+	EthVersion      int
+	SourceConfidence string
+}
+
+// msgTypeToStr converts an eth message code to the message_type string.
+func msgTypeToStr(msgType uint64) string {
+	switch msgType {
+	case ethprot.NewPooledTransactionHashesMsg:
+		return "announcement"
+	case ethprot.TransactionsMsg:
+		return "direct_broadcast"
+	case ethprot.PooledTransactionsMsg:
+		return "pooled_tx_response"
+	default:
+		return "unknown"
+	}
+}
+
+// HeartbeatInterval is the interval at which HeartbeatCollectionRun refreshes end_ns.
+const HeartbeatInterval = 60 * time.Second
+
+// initSchema creates the necessary tables if they don't exist.
 func initSchema(db *sql.DB) error {
-	// Create collection_runs table
+	// Create collection_runs table (with counter columns for observed/stored/dropped).
 	if _, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS collection_runs (
 			run_id INTEGER PRIMARY KEY,
@@ -82,7 +693,10 @@ func initSchema(db *sql.DB) error {
 			schema_version TEXT NOT NULL,
 			mode TEXT NOT NULL CHECK (mode IN ('passive', 'fetch')),
 			data_label TEXT NOT NULL CHECK (data_label IN ('MAINNET_OBSERVATION', 'LOCAL_TESTNET', 'CONTROLLED_SIMULATION')),
-			notes TEXT
+			notes TEXT,
+			observed_count INTEGER DEFAULT 0,
+			stored_count INTEGER DEFAULT 0,
+			dropped_count INTEGER DEFAULT 0
 		);
 	`); err != nil {
 		return fmt.Errorf("failed to create collection_runs table: %w", err)
@@ -173,8 +787,6 @@ func initSchema(db *sql.DB) error {
 	}
 
 	// Create transaction_inclusion table for storing external lookup results.
-	// Point 4: append-only — a new row is written per resolve run (identified by resolve_run_id),
-	// so INSERT is used instead of INSERT OR REPLACE and earlier results are never overwritten.
 	if _, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS transaction_inclusion (
 			tx_hash BLOB NOT NULL,
@@ -199,10 +811,7 @@ func initSchema(db *sql.DB) error {
 		return fmt.Errorf("failed to create block_number index: %w", err)
 	}
 
-	// Point 2: resolver_runs table — per-execution resolver run IDs, separate
-	// from collection run IDs, so the resolver labels its append-only
-	// transaction_inclusion rows with its own run ID and re-run/resume never
-	// conflicts with collection run IDs.
+	// resolver_runs table — per-execution resolver run IDs, separate from collection run IDs.
 	if _, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS resolver_runs (
 			run_id INTEGER PRIMARY KEY,
@@ -224,7 +833,7 @@ func initSchema(db *sql.DB) error {
 		return fmt.Errorf("failed to create resolver run start_ns index: %w", err)
 	}
 
-	// Point 4 migration path: add resolve_run_id and included_flag columns if missing
+	// Migration path: add resolve_run_id and delivered_before_block columns if missing
 	// (for DBs created by older schema). resolve_run_id defaults to 0 so earlier rows keep their identity.
 	if _, err := db.Exec(`ALTER TABLE transaction_inclusion ADD COLUMN resolve_run_id INTEGER NOT NULL DEFAULT 0`); err != nil {
 		if !isDuplicateColumnErr(err) {
@@ -274,265 +883,40 @@ func toLower(s string) string {
 	return b.String()
 }
 
-// StoreTxObservation saves a transaction observation.
-// runID and observerID come from the active collection run (labelled by data_label in collection_runs).
-func (s *Storage) StoreTxObservation(runID int64, observerID string, peerID string, txHash []byte, msgType uint64, txType uint8, announcedSize uint32, rawTx []byte, isAnnouncement bool, custodyMask []byte) error {
-	// Determine message type string
-	var msgTypeStr string
-	switch msgType {
-	case ethprot.NewPooledTransactionHashesMsg:
-		msgTypeStr = "announcement"
-	case ethprot.TransactionsMsg:
-		msgTypeStr = "direct_broadcast"
-	case ethprot.PooledTransactionsMsg:
-		msgTypeStr = "pooled_tx_response"
-	default:
-		msgTypeStr = "unknown"
-	}
-
-	// Determine source confidence (for now, all direct observations)
-	sourceConfidence := "direct"
-
-	// Insert the observation
-	_, err := s.db.Exec(`
-		INSERT INTO transaction_observations (
-			run_id, observer_id, peer_id, tx_hash, timestamp_ns,
-			message_type, eth_version, tx_type, announced_size,
-			raw_transaction, source_confidence, custody_mask
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`,
-		runID,
-		observerID,
-		peerID,
-		txHash,
-		time.Now().UnixNano(),
-		msgTypeStr,
-		72, // eth_version - placeholder
-		txType,
-		announcedSize,
-		rawTx,
-		sourceConfidence,
-		custodyMask,
-	)
+// GetLastRunID gets the ID of the most recent run (read-only).
+func (s *Storage) GetLastRunID() (int64, error) {
+	var nullID sql.NullInt64
+	err := s.db.QueryRow(`SELECT MAX(run_id) FROM collection_runs`).Scan(&nullID)
 	if err != nil {
-		return fmt.Errorf("failed to store tx observation: %w", err)
+		return 0, fmt.Errorf("failed to get last run ID: %w", err)
 	}
-
-	// Also insert into tracked_transactions if not already present (to start tracking for inclusion)
-	// We use INSERT OR IGNORE to avoid updating existing entries (we want to keep the first_seen_ns as the earliest observation)
-	now := time.Now().UnixNano()
-	initialDelay := int64(time.Second) // 1 second initial delay
-	_, err = s.db.Exec(`
-		INSERT OR IGNORE INTO tracked_transactions (
-			tx_hash, first_seen_ns, last_checked_ns, next_check_ns, attempt
-		) VALUES (?, ?, ?, ?, ?)
-	`,
-		txHash,
-		now,
-		now,
-		now + initialDelay,
-		0,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to insert into tracked_transactions: %w", err)
+	if !nullID.Valid {
+		return 0, nil // no runs yet
 	}
-
-	return nil
+	return nullID.Int64, nil
 }
 
-// BatchTxObservation bundles all fields for a single transaction observation insert,
-// used by StoreTxObservations which writes a whole message's worth in one tx.
-type BatchTxObservation struct {
-	RunID             int64
-	ObserverID       string
-	PeerID           string
-	TxHash           []byte
-	MsgType         uint64
-	TxType          uint8
-	AnnouncedSize   uint32
-	RawTx           []byte
-	IsAnnouncement  bool
-	CustodyMask     []byte
-	EthVersion      int
-	SourceConfidence string
-}
-
-// StoreTxObservations persists multiple transaction observations in a single
-// database transaction (one transaction per message). This batches what would
-// otherwise be one db.Exec per observation into one INSERT ... VALUES per row
-// inside one transaction, matching "one transaction per message".
-func (s *Storage) StoreTxObservations(obs []BatchTxObservation) error {
-	if len(obs) == 0 {
-		return nil
-	}
-
-	tx, err := s.db.Begin()
+// GetLastRunTimes gets the start and end times of the most recent run (read-only).
+func (s *Storage) GetLastRunTimes() (int64, int64, error) {
+	var startTime, endTime sql.NullInt64
+	err := s.db.QueryRow(`
+		SELECT start_ns, end_ns
+		FROM collection_runs
+		WHERE run_id = (SELECT MAX(run_id) FROM collection_runs)
+	`).Scan(&startTime, &endTime)
 	if err != nil {
-		return fmt.Errorf("failed to begin tx for batch obs insert: %w", err)
-	}
-	defer tx.Rollback()
-
-	stmt, err := tx.Prepare(`
-		INSERT INTO transaction_observations (
-			run_id, observer_id, peer_id, tx_hash, timestamp_ns,
-			message_type, eth_version, tx_type, announced_size,
-			raw_transaction, source_confidence, custody_mask
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`)
-	if err != nil {
-		return fmt.Errorf("failed to prepare batch obs insert: %w", err)
-	}
-	defer stmt.Close()
-
-	now := time.Now().UnixNano()
-	for _, o := range obs {
-		msgTypeStr := msgTypeToStr(o.MsgType)
-		_, err = stmt.Exec(
-			o.RunID,
-			o.ObserverID,
-			o.PeerID,
-			o.TxHash,
-			now,
-			msgTypeStr,
-			o.EthVersion,
-			o.TxType,
-			o.AnnouncedSize,
-			o.RawTx,
-			o.SourceConfidence,
-			o.CustodyMask,
-		)
-		if err != nil {
-			return fmt.Errorf("failed to store tx observation: %w", err)
+		if err == sql.ErrNoRows {
+			return 0, 0, nil // no runs yet
 		}
-
-		// Also insert into tracked_transactions if not already present.
-		initialDelay := int64(time.Second)
-		_, err = tx.Exec(`
-			INSERT OR IGNORE INTO tracked_transactions (
-				tx_hash, first_seen_ns, last_checked_ns, next_check_ns, attempt
-			) VALUES (?, ?, ?, ?, ?)
-		`,
-			o.TxHash,
-			now,
-			now,
-			now + initialDelay,
-			0,
-		)
-		if err != nil {
-			return fmt.Errorf("failed to insert into tracked_transactions: %w", err)
-		}
+		return 0, 0, fmt.Errorf("failed to get last run times: %w", err)
 	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit batch obs insert: %w", err)
+	if !startTime.Valid || !endTime.Valid {
+		return 0, 0, nil // no runs yet or invalid times
 	}
-	return nil
+	return startTime.Int64, endTime.Int64, nil
 }
 
-// msgTypeToStr converts an eth message code to the message_type string.
-func msgTypeToStr(msgType uint64) string {
-	switch msgType {
-	case ethprot.NewPooledTransactionHashesMsg:
-		return "announcement"
-	case ethprot.TransactionsMsg:
-		return "direct_broadcast"
-	case ethprot.PooledTransactionsMsg:
-		return "pooled_tx_response"
-	default:
-		return "unknown"
-	}
-}
-
-// StorePeerEvent saves a peer lifecycle event.
-// runID and observerID come from the active collection run (labelled by data_label in collection_runs).
-func (s *Storage) StorePeerEvent(runID int64, observerID string, peerID string, eventType string, direction string, clientName string, clientVersion string, enode string, remoteAddr string, ethVersion int, detailJSON string) error {
-	// Insert the peer event
-	_, err := s.db.Exec(`
-		INSERT INTO peer_events (
-			run_id, observer_id, peer_id, event_type, direction,
-			timestamp_ns, client_name, client_version, enode, remote_addr,
-			eth_version, detail_json
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`,
-		runID,
-		observerID,
-		peerID,
-		eventType,
-		direction,
-		time.Now().UnixNano(),
-		clientName,
-		clientVersion,
-		enode,
-		remoteAddr,
-		ethVersion,
-		detailJSON,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to store peer event: %w", err)
-	}
-
-	return nil
-}
-
-// StartCollectionRun inserts a new collection run row with start_ns set and returns the new run id
-func (s *Storage) StartCollectionRun(run *CollectionRun) (int64, error) {
-	res, err := s.db.Exec(`
-		INSERT INTO collection_runs (
-			start_ns, end_ns, observer_id, geth_lib_version,
-			go_build_version, collector_git_commit, config_hash,
-			schema_version, mode, data_label, notes
-		) VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`,
-		run.StartTime.UnixNano(),
-		run.ObserverID,
-		run.GethLibVersion,
-		run.GoBuildVersion,
-		run.CollectorGitCommit,
-		run.ConfigHash,
-		run.SchemaVersion,
-		run.Mode,
-		run.DataLabel,
-		run.Notes,
-	)
-	if err != nil {
-		return 0, fmt.Errorf("failed to start collection run: %w", err)
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return 0, fmt.Errorf("failed to get last insert id: %w", err)
-	}
-	return id, nil
-}
-
-// StoreCollectionRun saves collection run metadata
-func (s *Storage) StoreCollectionRun(run *CollectionRun) error {
-	_, err := s.db.Exec(`
-		INSERT INTO collection_runs (
-			start_ns, end_ns, observer_id, geth_lib_version,
-			go_build_version, collector_git_commit, config_hash,
-			schema_version, mode, data_label, notes
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`,
-		run.StartTime.UnixNano(),
-		func() int64 { if run.EndTime.IsZero() { return 0 }; return run.EndTime.UnixNano() }(),
-		run.ObserverID,
-		run.GethLibVersion,
-		run.GoBuildVersion,
-		run.CollectorGitCommit,
-		run.ConfigHash,
-		run.SchemaVersion,
-		run.Mode,
-		run.DataLabel,
-		run.Notes,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to store collection run: %w", err)
-	}
-
-	return nil
-}
-
-// GetTrackedTransactionsDueForCheck returns tracked transactions that are due for a check (next_check_ns <= now)
+// GetTrackedTransactionsDueForCheck returns tracked transactions due for a check (read-only).
 func (s *Storage) GetTrackedTransactionsDueForCheck(now int64) ([]*TrackedTransaction, error) {
 	rows, err := s.db.Query(`
 		SELECT tx_hash, first_seen_ns, last_checked_ns, next_check_ns, attempt, included, block_number, block_hash, transaction_index, useful_score
@@ -548,13 +932,12 @@ func (s *Storage) GetTrackedTransactionsDueForCheck(now int64) ([]*TrackedTransa
 	for rows.Next() {
 		var txHash []byte
 		var firstSeenNs, lastCheckedNs, nextCheckNs, attempt int64
-		var includedInt sql.NullInt64 // 0 = false, 1 = true, NULL = unknown
+		var includedInt sql.NullInt64
 		var blockNumber sql.NullInt64
 		var blockHash []byte
 		var transactionIndex sql.NullInt64
 		var usefulScore sql.NullFloat64
-		err := rows.Scan(&txHash, &firstSeenNs, &lastCheckedNs, &nextCheckNs, &attempt, &includedInt, &blockNumber, &blockHash, &transactionIndex, &usefulScore)
-		if err != nil {
+		if err := rows.Scan(&txHash, &firstSeenNs, &lastCheckedNs, &nextCheckNs, &attempt, &includedInt, &blockNumber, &blockHash, &transactionIndex, &usefulScore); err != nil {
 			return nil, fmt.Errorf("failed to scan tracked transaction: %w", err)
 		}
 		var included *bool
@@ -593,126 +976,62 @@ func (s *Storage) GetTrackedTransactionsDueForCheck(now int64) ([]*TrackedTransa
 	return transactions, nil
 }
 
-// UpdateTrackedTransaction updates the tracking info for a transaction after a check
+// UpdateTrackedTransaction updates the tracking info for a transaction after a check.
+// Goes through the single writer so all writes are serialized.
 func (s *Storage) UpdateTrackedTransaction(txHash []byte, lastChecked int64, nextCheck int64, attempt int, included *bool, blockNumber *int64, blockHash []byte, transactionIndex *int64, usefulScore *float64) error {
-	var includedInt sql.NullInt64
-	if included != nil {
-		if *included {
-			includedInt.Int64 = 1
-		} else {
-			includedInt.Int64 = 0
-		}
-		includedInt.Valid = true
+	done := make(chan error, 1)
+	req := writeReq{
+		do: func(tx *sql.Tx) error {
+			var includedInt sql.NullInt64
+			if included != nil {
+				if *included {
+					includedInt.Int64 = 1
+				} else {
+					includedInt.Int64 = 0
+				}
+				includedInt.Valid = true
+			}
+			var blockNumberInt sql.NullInt64
+			if blockNumber != nil {
+				blockNumberInt.Int64 = *blockNumber
+				blockNumberInt.Valid = true
+			}
+			var transactionIndexInt sql.NullInt64
+			if transactionIndex != nil {
+				transactionIndexInt.Int64 = *transactionIndex
+				transactionIndexInt.Valid = true
+			}
+			var usefulScoreFloat sql.NullFloat64
+			if usefulScore != nil {
+				usefulScoreFloat.Float64 = *usefulScore
+				usefulScoreFloat.Valid = true
+			}
+			_, err := tx.Exec(`
+				UPDATE tracked_transactions
+				SET last_checked_ns = ?,
+					next_check_ns = ?,
+					attempt = ?,
+					included = ?,
+					block_number = ?,
+					block_hash = ?,
+					transaction_index = ?,
+					useful_score = ?
+				WHERE tx_hash = ?
+			`, lastChecked, nextCheck, attempt, includedInt, blockNumberInt, blockHash, transactionIndexInt, usefulScoreFloat, txHash)
+			if err != nil {
+				return fmt.Errorf("failed to update tracked transaction: %w", err)
+			}
+			return nil
+		},
+		done: done,
 	}
-	var blockNumberInt sql.NullInt64
-	if blockNumber != nil {
-		blockNumberInt.Int64 = *blockNumber
-		blockNumberInt.Valid = true
+	if err := s.channelSend(req); err != nil {
+		return err
 	}
-	var transactionIndexInt sql.NullInt64
-	if transactionIndex != nil {
-		transactionIndexInt.Int64 = *transactionIndex
-		transactionIndexInt.Valid = true
-	}
-	var usefulScoreFloat sql.NullFloat64
-	if usefulScore != nil {
-		usefulScoreFloat.Float64 = *usefulScore
-		usefulScoreFloat.Valid = true
-	}
-	_, err := s.db.Exec(`
-		UPDATE tracked_transactions
-		SET last_checked_ns = ?,
-			next_check_ns = ?,
-			attempt = ?,
-			included = ?,
-			block_number = ?,
-			block_hash = ?,
-			transaction_index = ?,
-			useful_score = ?
-		WHERE tx_hash = ?
-	`, lastChecked, nextCheck, attempt, includedInt, blockNumberInt, blockHash, transactionIndexInt, usefulScoreFloat, txHash)
-	if err != nil {
-		return fmt.Errorf("failed to update tracked transaction: %w", err)
-	}
-	return nil
+	return <-done
 }
 
-// GetLastRunID gets the ID of the most recent run
-func (s *Storage) GetLastRunID() (int64, error) {
-	var nullID sql.NullInt64
-	err := s.db.QueryRow(`SELECT MAX(run_id) FROM collection_runs`).Scan(&nullID)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get last run ID: %w", err)
-	}
-	if !nullID.Valid {
-		return 0, nil // no runs yet
-	}
-	return nullID.Int64, nil
-}
-
-// GetLastRunTimes gets the start and end times of the most recent run
-func (s *Storage) GetLastRunTimes() (int64, int64, error) {
-	var startTime, endTime sql.NullInt64
-	err := s.db.QueryRow(`
-		SELECT start_ns, end_ns
-		FROM collection_runs
-		WHERE run_id = (SELECT MAX(run_id) FROM collection_runs)
-	`).Scan(&startTime, &endTime)
-	if err != nil {
-		// Handle the case where no runs exist
-		if err == sql.ErrNoRows {
-			return 0, 0, nil // no runs yet
-		}
-		return 0, 0, fmt.Errorf("failed to get last run times: %w", err)
-	}
-	if !startTime.Valid || !endTime.Valid {
-		return 0, 0, nil // no runs yet or invalid times
-	}
-	return startTime.Int64, endTime.Int64, nil
-}
-
-// Point 2: resolver run helpers (resolver_runs table, separate from collection_runs).
-
-// StartResolverRun inserts a new resolver run row with start_ns set and returns the new run id
-func (s *Storage) StartResolverRun(startTime time.Time, observerID, gethLibVersion, goBuildVersion, configHash, schemaVersion, notes string) (int64, error) {
-	res, err := s.db.Exec(`
-		INSERT INTO resolver_runs (
-			start_ns, end_ns, observer_id, geth_lib_version,
-			go_build_version, config_hash, schema_version, notes
-		) VALUES (?, 0, ?, ?, ?, ?, ?, ?)
-	`,
-		startTime.UnixNano(),
-		observerID,
-		gethLibVersion,
-		goBuildVersion,
-		configHash,
-		schemaVersion,
-		notes,
-	)
-	if err != nil {
-		return 0, fmt.Errorf("failed to start resolver run: %w", err)
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return 0, fmt.Errorf("failed to get last insert id: %w", err)
-	}
-	return id, nil
-}
-
-// UpdateResolverRunEndTime sets end_ns for the given resolver run id
-func (s *Storage) UpdateResolverRunEndTime(runID int64) error {
-	_, err := s.db.Exec(`
-		UPDATE resolver_runs
-		SET end_ns = ?
-		WHERE run_id = ?
-	`, time.Now().UnixNano(), runID)
-	if err != nil {
-		return fmt.Errorf("failed to update resolver run end time: %w", err)
-	}
-	return nil
-}
-
-// GetLastResolverRunID gets the ID of the most recent resolver run
+// GetLastResolverRunID gets the ID of the most recent resolver run (read-only).
 func (s *Storage) GetLastResolverRunID() (int64, error) {
 	var nullID sql.NullInt64
 	err := s.db.QueryRow(`SELECT MAX(run_id) FROM resolver_runs`).Scan(&nullID)
@@ -725,43 +1044,3 @@ func (s *Storage) GetLastResolverRunID() (int64, error) {
 	return nullID.Int64, nil
 }
 
-// Point 3: 60s heartbeat update to collection_runs end_ns so a crash leaves a usable end time.
-const HeartbeatInterval = 60 * time.Second
-
-// HeartbeatCollectionRun periodically refreshes end_ns for the given collection
-// run id until ctx is cancelled. On crash (ctx cancelled via signal), the last
-// heartbeat value is the crash time — a usable end time.
-func (s *Storage) HeartbeatCollectionRun(ctx context.Context, runID int64) error {
-	ticker := time.NewTicker(HeartbeatInterval)
-	defer ticker.Stop()
-
-	// Do an immediate heartbeat so end_ns is set from the start
-	if err := s.UpdateCollectionRunEndTime(runID); err != nil {
-		return fmt.Errorf("initial heartbeat: %w", err)
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-			if err := s.UpdateCollectionRunEndTime(runID); err != nil {
-				log.Error("Heartbeat failed", "run_id", runID, "err", err)
-				// Non-fatal: keep trying
-			}
-		}
-	}
-}
-
-// UpdateCollectionRunEndTime sets end_ns for the given run id (e.g. on Ctrl+C shutdown)
-func (s *Storage) UpdateCollectionRunEndTime(runID int64) error {
-	_, err := s.db.Exec(`
-		UPDATE collection_runs
-		SET end_ns = ?
-		WHERE run_id = ?
-	`, time.Now().UnixNano(), runID)
-	if err != nil {
-		return fmt.Errorf("failed to update collection run end time: %w", err)
-	}
-	return nil
-}

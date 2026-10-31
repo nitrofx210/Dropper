@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"io/ioutil"
 	"time"
@@ -8,6 +9,15 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 )
+
+// utf8BOM is a UTF-8 byte order mark (EF BB BF).
+var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
+
+// stripBOM removes a leading UTF-8 BOM if present so json.Unmarshal does not
+// fail on files that begin with one.
+func stripBOM(data []byte) []byte {
+	return bytes.TrimPrefix(data, utf8BOM)
+}
 
 // Config holds observer configuration
 type Config struct {
@@ -97,6 +107,9 @@ func Load(configFile string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Strip a leading UTF-8 BOM so json.Unmarshal doesn't choke on BOM-ed files.
+	data = stripBOM(data)
 
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
