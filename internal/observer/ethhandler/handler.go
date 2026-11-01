@@ -247,7 +247,11 @@ func (h *EthHandler) handle(p *p2p.Peer, rw p2p.MsgReadWriter, version uint) err
 	// both wait for the other to send Status first and the connection drops.
 	if err := h.doHandshake(p, rw, version); err != nil {
 		log.Error("eth handshake failed", "peer", p.ID(), "version", version, "err", err)
-		h.storePeerEvent(p, "disconnect", int(version), "", "", fmt.Sprintf("eth handshake failed: %v", err))
+		// Do NOT write a disconnect peer_event here: the p2p server emits exactly
+		// one PeerEventTypeDrop per connection, which the observer's event consumer
+		// (observer.go logAndStorePeerEvent) persists as a single disconnect row.
+		// Writing it here too would double-count disconnects (one from this failure
+		// path, another from the server drop feed).
 		return fmt.Errorf("eth handshake failed: %w", err)
 	}
 

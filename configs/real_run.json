@@ -3,7 +3,7 @@
     "max_peers":  50,
     "mode":  "passive",
     "data_label":  "MAINNET_OBSERVATION",
-    "storage_path":  "mainnet_pilot_2026-10-25.db",
+    "storage_path": "mainnet_2026-10-31.db",
     "bootnodes":  [
 
                   ],

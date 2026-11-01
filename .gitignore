@@ -1,8 +1,8 @@
 # Build artifacts
 *.exe
-observer
-resolver
-analyzer
+/observer
+/resolver
+/analyzer
 
 # Database files
 *.db
@@ -50,3 +50,9 @@ ethp2p/
 # Temp / office lock files
 ~$*.docx
 _testout.txt
+
+# Scratch directory (point 6)
+/scratch/
+
+# Compiled binaries under cmd/ that are not covered by *.exe
+/cmd/blockresolver/blockresolver

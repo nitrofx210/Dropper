@@ -702,6 +702,26 @@ func initSchema(db *sql.DB) error {
 		return fmt.Errorf("failed to create collection_runs table: %w", err)
 	}
 
+	// Migration path: add the observed/stored/dropped counter columns to
+	// collection_runs if missing (DBs created before this schema change,
+	// e.g. mainnet_pilot_2026-10-25.db). Each column defaults to 0 so
+	// existing runs start from a zero counter instead of failing open.
+	if _, err := db.Exec(`ALTER TABLE collection_runs ADD COLUMN observed_count INTEGER DEFAULT 0`); err != nil {
+		if !isDuplicateColumnErr(err) {
+			return fmt.Errorf("failed to add observed_count column: %w", err)
+		}
+	}
+	if _, err := db.Exec(`ALTER TABLE collection_runs ADD COLUMN stored_count INTEGER DEFAULT 0`); err != nil {
+		if !isDuplicateColumnErr(err) {
+			return fmt.Errorf("failed to add stored_count column: %w", err)
+		}
+	}
+	if _, err := db.Exec(`ALTER TABLE collection_runs ADD COLUMN dropped_count INTEGER DEFAULT 0`); err != nil {
+		if !isDuplicateColumnErr(err) {
+			return fmt.Errorf("failed to add dropped_count column: %w", err)
+		}
+	}
+
 	// Create peer_events table
 	if _, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS peer_events (
