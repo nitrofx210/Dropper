@@ -1,6 +1,6 @@
 Subject: Ethereum Dropper Project Update - RPC Endpoint Findings & Transaction Inclusion Analysis (Week of 2026-10-11)
 
-Dear [Supervisor's Name],
+Dear Sir,
 
 As requested in our meeting two days ago, please find below my update on the Ethereum Dropper project within the one-week timeline. This email covers the two key action items: RPC endpoint feasibility testing and transaction inclusion time window analysis from the Geth dropper mechanism (PR #34702).
 

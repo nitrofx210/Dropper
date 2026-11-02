@@ -1,7 +1,7 @@
 # Per-Block Resolver Design
 
 ## 5-line summary for supervisor email
-Replace transaction-by-transaction polling with block-based fetching: download blocks via eth_getBlockByNumber(n, false) (headers+tx hashes), lookup hashes in database index. Store results in new transaction_inclusion table while keeping observer DB read-only. Use finalized tag for reorg safety and single post-run margin from run end.
+Replace transaction-by-transaction polling with block-based fetching: download blocks via eth_getBlockByNumber(n, false) (headers+tx hashes), lookup hashes in database index. Store results in new transaction_inclusion table with inclusion_time_ns, finalized_checked_at_ns (query time), and derived finalization_estimate_ns while keeping observer DB read-only. Use finalized tag for reorg safety and single post-run margin from run end.
 
 ## Design Overview
 
@@ -27,36 +27,19 @@ The current resolver polls `eth_getTransactionByHash` per transaction with expon
 - Value configurable via command-line flags or config file
 
 ### Block Fetching and Processing
-```
-FOR each block in range(start_block, end_block):
-    // Use batching when possible: fetch up to batch-size blocks per RPC call
-    FETCH blocks via eth_getBlockByNumber(_, false) in batches of up to <batch-size>
-    // Each block request returns header fields + transaction hashes (not full tx objects)
-    IF request fails:
-        APPLY rate limiting, retry, and endpoint failover logic
-        CONTINUE to next block (or retry same block based on error type)
-    FOR each block in batch:
-        EXTRACT block_timestamp and transaction hashes from block
-        LOOK UP each transaction hash in block_transactions in database index (do NOT loop over all observed transactions per block)
-        FOR each matched observed transaction NOT yet finally determined:
-            // Apply inclusion rule: first_seen_time < block_time
-            IF tx.first_seen_ns < block_timestamp_ns:
-                INSERT INTO transaction_inclusion (
-                    tx_hash, block_number, block_hash, 
-                    inclusion_time_ns, finalization_time_ns,
-                    lookup_source, last_lookup_ns, lookup_attempts
-                ) VALUES (
-                    <tx_hash>, <block_number>, <block_hash>,
-                    <block_timestamp_ns>, <query_timestamp_ns>,
-                    'rpc_block', <query_timestamp_ns>, 1
-                )
-            END IF
-        END FOR
-    END FOR
-    OPEN observer database connection AS READ-ONLY to avoid interfering with ongoing writes
-FOR each unmatched observed transaction still pending:
-    CONTINUE observing (still "not found yet")
-```
+For each block in the determined range:
+1. Fetch block via `eth_getBlockByNumber(block_number, false)` (headers + tx hashes only)
+2. Extract block timestamp and transaction hashes
+3. Look up each transaction hash in `tracked_transactions` using the tx_hash index
+4. For each matched transaction not yet finally determined:
+   - Apply inclusion rule: `tx.first_seen_ns < block_timestamp`
+   - If true, record inclusion in `transaction_inclusion` table:
+     * `inclusion_time_ns` = block timestamp
+     * `finalized_checked_at_ns` = query time
+     * `finalization_estimate_ns` = inclusion_time_ns + ~13 minutes (derived)
+   - Update `tracked_transactions` to mark as included and stop checking
+5. Transactions not meeting inclusion rule remain in "not found yet" state for future blocks
+6. Use read-only database connection to avoid interfering with ongoing writes
 
 ### State Management and Honest Outcomes
 The resolver maintains three distinct states for each transaction:
@@ -109,8 +92,10 @@ The **authoritative schema today** uses the `tracked_transactions` table, **not*
   - Contains fields: `first_seen_ns`, `last_checked_ns`, `next_check_ns`, `attempt`, `included`, `block_number`, `block_hash`, `transaction_index`, `useful_score`
   - `included` is NULL/unknown, true/false
 - `transaction_inclusion`: Proposed but not implemented external lookup results table mentioned in Phase 0 report
-  - Will contain: `tx_hash`, `block_number`, `block_hash`, `inclusion_time_ns`, `finalization_time_ns`, `lookup_source`, `last_lookup_ns`, `lookup_attempts`
+  - Will contain: `tx_hash`, `block_number`, `block_hash`, `inclusion_time_ns`, `finalized_checked_at_ns`, `finalization_estimate_ns`, `lookup_source`, `last_lookup_ns`, `lookup_attempts`
   - Status determined by NULL/not NULL values in time fields
+  - `finalized_checked_at_ns`: Query time when inclusion was learned via RPC
+  - `finalization_estimate_ns`: DERIVED field (inclusion_time_ns + ~13m) representing estimated finalization time based on RecentIncluded half-life
 
 **For this implementation**: The per-block resolver will populate the `transaction_inclusion` table with results from external lookup, keeping it separate from the working `tracked_transactions` table. This maintains clear separation between internal observation data and external lookup results.
 
@@ -121,7 +106,8 @@ Not silently renaming or merging anything. Instead:
    - `tx_hash` (foreign key to tracked_transactions)
    - `block_number`, `block_hash` (where transaction was found)
    - `inclusion_time_ns` (block timestamp when transaction was mined)
-   - `finalization_time_ns` (when we learned about inclusion via RPC)
+   - `finalized_checked_at_ns` (when we learned about inclusion via RPC - query time)
+   - `finalization_estimate_ns` (DERIVED: inclusion_time_ns + ~13m = block timestamp + RecentIncluded half-life)
    - `lookup_source` (e.g., 'rpc_block')
    - `last_lookup_ns` timestamp
    - `lookup_attempts` count

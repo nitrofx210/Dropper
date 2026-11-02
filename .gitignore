@@ -56,3 +56,7 @@ _testout.txt
 
 # Compiled binaries under cmd/ that are not covered by *.exe
 /cmd/blockresolver/blockresolver
+
+# Archived strays (Task 4: moved out of working tree; never commit)
+/_archive/
+/.arena/
