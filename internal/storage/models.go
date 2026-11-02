@@ -36,6 +36,7 @@ type TxObservation struct {
 	RawTransaction  []byte
 	SourceConfidence string // direct, inferred, unknown
 	CustodyMask     []byte
+	PeerConnAgeMs   *int64 // milliseconds since this peer's handshake completed; NULL if unrecorded
 }
 
 // CollectionRun represents a single observer run

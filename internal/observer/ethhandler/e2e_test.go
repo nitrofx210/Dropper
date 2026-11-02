@@ -3,6 +3,7 @@ package ethhandler
 import (
 	"io"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -184,6 +185,125 @@ func TestDecodeFailureDoesNotKillConnection(t *testing.T) {
 	}
 	if count != 1 {
 		t.Errorf("expected 1 row after decode failure + valid announcement, got %d", count)
+	}
+}
+
+// TestPeerConnAgeMs verifies peer_conn_age_ms recorded at ingest: the first
+// announcement right after handshake is ~0ms, a later announcement (after a
+// short delay) is larger, and a peer with no recorded handshake stores NULL.
+func TestPeerConnAgeMs(t *testing.T) {
+	sto, err := storage.New("file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("failed to open storage: %v", err)
+	}
+	defer sto.Close()
+
+	h := New(sto, 1, "test-observer", false, false, 0)
+	h.SetRunContext(1, "test-observer")
+
+	rwA, rwB := p2p.MsgPipe()
+	defer func() { _ = rwA.Close(); _ = rwB.Close() }()
+
+	peerA := p2p.NewPeerPipe(testPeerID(1), "peerA", nil, rwA)
+	peerB := p2p.NewPeerPipe(testPeerID(2), "peerB", nil, rwB)
+
+	// Record peerA's handshake completion now; peerB never handshakes.
+	peerAID := peerA.ID().String()
+	h.peerHandshakeMu.Lock()
+	h.peerHandshakeNs[peerAID] = time.Now().UnixNano()
+	h.peerHandshakeMu.Unlock()
+
+	hash := crypto.Keccak256Hash([]byte("conn-age-tx"))
+	announcement := &ethprot.NewPooledTransactionHashesPacket72{
+		Hashes: []common.Hash{hash},
+		Types:  []uint8{0},
+		Sizes:  []uint32{0},
+		Mask:   types.CustodyBitmap{},
+	}
+
+	type sendResult struct{ err error }
+
+	// First announcement right after handshake: conn age ~0ms.
+	ch1 := make(chan sendResult, 1)
+	go func() { ch1 <- sendResult{err: p2p.Send(rwA, ethprot.NewPooledTransactionHashesMsg, announcement)} }()
+	msg1, err := rwB.ReadMsg()
+	if err != nil {
+		t.Fatalf("read first announcement: %v", err)
+	}
+	if err := h.handleMessage(peerA, msg1, rwA, ethprot.ETH72); err != nil {
+		t.Fatalf("handleMessage first: %v", err)
+	}
+	if res := <-ch1; res.err != nil {
+		t.Fatalf("peer A first send: %v", res.err)
+	}
+
+	// Delay so the second announcement lands at a clearly larger conn age.
+	time.Sleep(150 * time.Millisecond)
+
+	// Second announcement after a delay: conn age must be larger than the first.
+	ch2 := make(chan sendResult, 1)
+	go func() { ch2 <- sendResult{err: p2p.Send(rwA, ethprot.NewPooledTransactionHashesMsg, announcement)} }()
+	msg2, err := rwB.ReadMsg()
+	if err != nil {
+		t.Fatalf("read second announcement: %v", err)
+	}
+	if err := h.handleMessage(peerA, msg2, rwA, ethprot.ETH72); err != nil {
+		t.Fatalf("handleMessage second: %v", err)
+	}
+	if res := <-ch2; res.err != nil {
+		t.Fatalf("peer A second send: %v", res.err)
+	}
+
+	// peerB never handshaked: conn age must be NULL.
+	ch3 := make(chan sendResult, 1)
+	go func() { ch3 <- sendResult{err: p2p.Send(rwB, ethprot.NewPooledTransactionHashesMsg, announcement)} }()
+	msg3, err := rwA.ReadMsg()
+	if err != nil {
+		t.Fatalf("read peerB announcement: %v", err)
+	}
+	if err := h.handleMessage(peerB, msg3, rwB, ethprot.ETH72); err != nil {
+		t.Fatalf("handleMessage peerB: %v", err)
+	}
+	if res := <-ch3; res.err != nil {
+		t.Fatalf("peer B send: %v", res.err)
+	}
+
+	// Assert conn ages in insertion order.
+	rows, err := sto.DB().Query(`SELECT peer_conn_age_ms FROM transaction_observations ORDER BY observation_id`)
+	if err != nil {
+		t.Fatalf("query conn ages: %v", err)
+	}
+	defer rows.Close()
+
+	var ages []*int64
+	for rows.Next() {
+		var age *int64
+		if err := rows.Scan(&age); err != nil {
+			t.Fatalf("scan conn age: %v", err)
+		}
+		ages = append(ages, age)
+	}
+	if len(ages) != 3 {
+		t.Fatalf("expected 3 observation rows, got %d", len(ages))
+	}
+
+	if ages[0] == nil {
+		t.Fatalf("first announcement conn age must not be NULL (~0ms expected)")
+	}
+	if *ages[0] > 50 {
+		t.Errorf("first announcement conn age should be ~0ms, got %dms", *ages[0])
+	}
+	if ages[1] == nil {
+		t.Fatalf("second announcement conn age must not be NULL (> first expected)")
+	}
+	if *ages[1] <= *ages[0] {
+		t.Errorf("second announcement conn age (%dms) must be larger than first (%dms)", *ages[1], *ages[0])
+	}
+	if ages[1] != nil && *ages[1] < 100 {
+		t.Errorf("second announcement conn age should be ~150ms after delay, got %dms", *ages[1])
+	}
+	if ages[2] != nil {
+		t.Errorf("peerB (no handshake) conn age must be NULL, got %dms", *ages[2])
 	}
 }
 

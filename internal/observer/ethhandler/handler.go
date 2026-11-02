@@ -84,6 +84,11 @@ type EthHandler struct {
 	decodeFailures map[uint64]uint64
 	decodeFailMu   sync.Mutex
 	lastDecodeLog  time.Time
+
+	// peerHandshakeNs records, per peer ID string, the monotonic nanosecond at
+	// which that connection's eth handshake completed. Guarded by peerHandshakeMu.
+	peerHandshakeNs map[string]int64
+	peerHandshakeMu sync.Mutex
 }
 
 // SetPeerDirCallback registers the callback that reports each peer's actual direction.
@@ -100,8 +105,9 @@ func New(sto *storage.Storage, runID int64, observerID string, fetchMode bool, d
 		fetchMode:            fetchMode,
 		txDisseminationEnabled: disseminationEnabled,
 		txReannounceRateLimiter: newRateLimiter(float64(disseminationRateLimit)),
-		decodeFailures: make(map[uint64]uint64),
-		lastDecodeLog:  time.Now(),
+		decodeFailures:         make(map[uint64]uint64),
+		lastDecodeLog:          time.Now(),
+		peerHandshakeNs:        make(map[string]int64),
 	}
 }
 
@@ -275,6 +281,13 @@ func (h *EthHandler) handle(p *p2p.Peer, rw p2p.MsgReadWriter, version uint) err
 	)
 	h.storePeerEvent(p, "handshake_ok", int(version), clientName, clientVersion, fmt.Sprintf("version %d head %s peer %x", version, headLog, id[:4]))
 
+	// Record when this connection's handshake completed so later observations
+	// can report their connection age without joining peer_events.
+	peerID := p.ID().String()
+	h.peerHandshakeMu.Lock()
+	h.peerHandshakeNs[peerID] = time.Now().UnixNano()
+	h.peerHandshakeMu.Unlock()
+
 	// Report actual direction so connect/disconnect events use p.Inbound().
 	if h.onPeerDir != nil {
 		h.onPeerDir(p.ID(), !p.Inbound())
@@ -413,6 +426,7 @@ func (h *EthHandler) handleNewPooledTxHashes(p *p2p.Peer, pkt *ethprot.NewPooled
 			CustodyMask:      nil,
 			EthVersion:       72,
 			SourceConfidence: "direct",
+			PeerConnAgeMs:    h.peerConnAgeMs(p),
 		})
 	}
 	if err := h.storage.StoreTxObservations(obs); err != nil {
@@ -483,6 +497,7 @@ func (h *EthHandler) handleNewPooledTxHashes72(p *p2p.Peer, pkt *ethprot.NewPool
 			CustodyMask:      custodyMaskBytes,
 			EthVersion:       72,
 			SourceConfidence: "direct",
+			PeerConnAgeMs:    h.peerConnAgeMs(p),
 		})
 	}
 	if err := h.storage.StoreTxObservations(obs); err != nil {
@@ -533,7 +548,7 @@ func (h *EthHandler) handleTransactions(p *p2p.Peer, msg p2p.Msg, rw p2p.MsgRead
 		txBytes := txRaw // Already the raw RLP bytes
 
 		// Store the observation
-		if err := h.storage.StoreTxObservation(h.runID, h.observerID, p.ID().String(), tx.Hash().Bytes(), uint64(ethprot.TransactionsMsg), 0, 0, txBytes, false, nil); err != nil {
+		if err := h.storage.StoreTxObservation(h.runID, h.observerID, p.ID().String(), tx.Hash().Bytes(), uint64(ethprot.TransactionsMsg), 0, 0, txBytes, false, nil, h.peerConnAgeMs(p)); err != nil {
 			return fmt.Errorf("failed to store tx observation: %w", err)
 		}
 
@@ -578,7 +593,7 @@ func (h *EthHandler) handlePooledTxResponse(p *p2p.Peer, msg p2p.Msg, rw p2p.Msg
 		txBytes := txRaw // Already the raw RLP bytes
 
 		// Store the observation
-		if err := h.storage.StoreTxObservation(h.runID, h.observerID, p.ID().String(), tx.Hash().Bytes(), uint64(ethprot.PooledTransactionsMsg), 0, 0, txBytes, false, nil); err != nil {
+		if err := h.storage.StoreTxObservation(h.runID, h.observerID, p.ID().String(), tx.Hash().Bytes(), uint64(ethprot.PooledTransactionsMsg), 0, 0, txBytes, false, nil, h.peerConnAgeMs(p)); err != nil {
 			return fmt.Errorf("failed to store tx observation: %w", err)
 		}
 
@@ -677,6 +692,21 @@ func (h *EthHandler) decodeFailure(p *p2p.Peer, msgCode uint64, version uint, er
 	}
 
 	return fmt.Errorf("failed to decode %s (version %d): %w", msgName, version, err)
+}
+
+// peerConnAgeMs returns the milliseconds since this peer's eth handshake
+// completed, or NULL if the handshake time was never recorded (e.g. the
+// observation arrived before handshake_ok). Read-time is at ingest, so this is
+// a cheap in-memory map lookup — no join to peer_events.
+func (h *EthHandler) peerConnAgeMs(p *p2p.Peer) *int64 {
+	h.peerHandshakeMu.Lock()
+	hsNs, ok := h.peerHandshakeNs[p.ID().String()]
+	h.peerHandshakeMu.Unlock()
+	if !ok {
+		return nil
+	}
+	ageMs := time.Since(time.Unix(0, hsNs)).Milliseconds()
+	return &ageMs
 }
 
 // ethMessageName returns a short name for an eth message code.

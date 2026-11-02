@@ -316,7 +316,7 @@ func isBusyErr(err error) bool {
 // ---- Write entry points (all enqueue onto writeCh; none touch s.db directly) ----
 
 // StoreTxObservation enqueues a single transaction observation.
-func (s *Storage) StoreTxObservation(runID int64, observerID string, peerID string, txHash []byte, msgType uint64, txType uint8, announcedSize uint32, rawTx []byte, isAnnouncement bool, custodyMask []byte) error {
+func (s *Storage) StoreTxObservation(runID int64, observerID string, peerID string, txHash []byte, msgType uint64, txType uint8, announcedSize uint32, rawTx []byte, isAnnouncement bool, custodyMask []byte, peerConnAgeMs *int64) error {
 	msgTypeStr := msgTypeToStr(msgType)
 	done := make(chan error, 1)
 	req := writeReq{
@@ -325,8 +325,8 @@ func (s *Storage) StoreTxObservation(runID int64, observerID string, peerID stri
 				INSERT INTO transaction_observations (
 					run_id, observer_id, peer_id, tx_hash, timestamp_ns,
 					message_type, eth_version, tx_type, announced_size,
-					raw_transaction, source_confidence, custody_mask
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+					raw_transaction, source_confidence, custody_mask, peer_conn_age_ms
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			`,
 				runID,
 				observerID,
@@ -340,6 +340,7 @@ func (s *Storage) StoreTxObservation(runID int64, observerID string, peerID stri
 				rawTx,
 				"direct",
 				custodyMask,
+				peerConnAgeMs,
 			)
 			if err != nil {
 				return fmt.Errorf("failed to store tx observation: %w", err)
@@ -382,8 +383,9 @@ func (s *Storage) StoreTxObservations(obs []BatchTxObservation) error {
 				INSERT INTO transaction_observations (
 					run_id, observer_id, peer_id, tx_hash, timestamp_ns,
 					message_type, eth_version, tx_type, announced_size,
-					raw_transaction, source_confidence, custody_mask
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+					raw_transaction, source_confidence, custody_mask,
+					peer_conn_age_ms
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			`)
 			if err != nil {
 				return fmt.Errorf("failed to prepare batch obs insert: %w", err)
@@ -406,6 +408,7 @@ func (s *Storage) StoreTxObservations(obs []BatchTxObservation) error {
 					o.RawTx,
 					o.SourceConfidence,
 					o.CustodyMask,
+					o.PeerConnAgeMs,
 				)
 				if err != nil {
 					return fmt.Errorf("failed to store tx observation: %w", err)
@@ -658,6 +661,7 @@ type BatchTxObservation struct {
 	CustodyMask     []byte
 	EthVersion      int
 	SourceConfidence string
+	PeerConnAgeMs   *int64
 }
 
 // msgTypeToStr converts an eth message code to the message_type string.
@@ -760,10 +764,20 @@ func initSchema(db *sql.DB) error {
 			raw_transaction BLOB,
 			source_confidence TEXT NOT NULL DEFAULT 'direct' CHECK (source_confidence IN ('direct', 'inferred', 'unknown')),
 			custody_mask BLOB,
+			peer_conn_age_ms INTEGER,
 			FOREIGN KEY (run_id) REFERENCES collection_runs(run_id)
 		);
 	`); err != nil {
 		return fmt.Errorf("failed to create transaction_observations table: %w", err)
+	}
+
+	// Migration path: add peer_conn_age_ms column if missing (DBs created
+	// before this column existed). NULL allowed — observations from peers
+	// whose handshake time isn't recorded store NULL.
+	if _, err := db.Exec(`ALTER TABLE transaction_observations ADD COLUMN peer_conn_age_ms INTEGER`); err != nil {
+		if !isDuplicateColumnErr(err) {
+			return fmt.Errorf("failed to add peer_conn_age_ms column: %w", err)
+		}
 	}
 
 	// Create indexes for common queries
