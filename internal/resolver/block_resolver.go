@@ -77,6 +77,14 @@ func (r *BlockResolver) Run(ctx context.Context) error {
 	}
 	r.resolverRunID = lastRunID
 
+	startTime, endTime, err := r.storage.GetLastRunTimes()
+	if err != nil {
+		return err
+	}
+	log.Info("resolver run times resolved", "start_ns", startTime, "end_ns", endTime,
+		"start_sec", startTime/int64(time.Second), "end_sec", endTime/int64(time.Second),
+		"span_s", (endTime-startTime)/int64(time.Second))
+
 	// Get the last processed block from checkpoint (if any)
 	lastProcessedBlock, err := r.getCheckpointBlock(ctx)
 	if err != nil {
@@ -88,11 +96,22 @@ func (r *BlockResolver) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	log.Info("resolver block range resolved", "start_block", startBlock, "end_block", endBlock,
+		"blocks", endBlock-startBlock+1)
+
+	// Empty range: nothing to process — exit quickly rather than silently returning RC=0.
+	if startBlock == 0 && endBlock == 0 {
+		log.Warn("resolver empty block range: no blocks to process", "start_block", startBlock, "end_block", endBlock)
+		return nil
+	}
 
 	// Process blocks in batches
-	if err := r.processBlockRange(ctx, startBlock, endBlock); err != nil {
+	blocksFetched, err := r.processBlockRange(ctx, startBlock, endBlock)
+	if err != nil {
 		return err
 	}
+	log.Info("resolver block range processed", "blocks_fetched", blocksFetched,
+		"start_block", startBlock, "end_block", endBlock)
 
 	// Update checkpoint
 	if err := r.updateCheckpoint(ctx, endBlock); err != nil {
@@ -201,14 +220,16 @@ func (r *BlockResolver) fetchBlockHeaderTimestamp(ctx context.Context, blockNum 
 	return header.Time, nil
 }
 
-// processBlockRange processes blocks from start to end (inclusive) using batching
-func (r *BlockResolver) processBlockRange(ctx context.Context, startBlock int64, endBlock int64) error {
+// processBlockRange processes blocks from start to end (inclusive) using batching.
+// Returns the number of blocks successfully fetched from RPC.
+func (r *BlockResolver) processBlockRange(ctx context.Context, startBlock int64, endBlock int64) (int, error) {
 	if startBlock > endBlock {
-		return nil
+		return 0, nil
 	}
 
+	blocksFetched := 0
 	// Process blocks in batches
-	var currentBlock int64
+	currentBlock := startBlock
 	for currentBlock <= endBlock {
 		// Calculate batch end
 		batchEnd := currentBlock + int64(r.batchSize) - 1
@@ -217,9 +238,11 @@ func (r *BlockResolver) processBlockRange(ctx context.Context, startBlock int64,
 		}
 
 		// Process this batch
-		if err := r.processBlockBatch(ctx, currentBlock, batchEnd); err != nil {
-			return err
+		batchFetched, err := r.processBlockBatch(ctx, currentBlock, batchEnd)
+		if err != nil {
+			return 0, err
 		}
+		blocksFetched += batchFetched
 
 		// Move to next batch
 		currentBlock = batchEnd + 1
@@ -227,48 +250,35 @@ func (r *BlockResolver) processBlockRange(ctx context.Context, startBlock int64,
 		// Check for context cancellation
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return blocksFetched, ctx.Err()
 		default:
 			// Continue processing
 		}
 	}
 
-	return nil
+	return blocksFetched, nil
 }
 
-// processBlockBatch processes a batch of block numbers
-func (r *BlockResolver) processBlockBatch(ctx context.Context, startBlock int64, endBlock int64) error {
-	// Prepare batch requests
-	var batchRequests []interface{}
+// processBlockBatch processes a batch of block numbers. Returns the number of
+// blocks successfully fetched from RPC.
+func (r *BlockResolver) processBlockBatch(ctx context.Context, startBlock int64, endBlock int64) (int, error) {
 	blockNumbers := make([]int64, 0, endBlock-startBlock+1)
-
 	for blockNum := startBlock; blockNum <= endBlock; blockNum++ {
 		blockNumbers = append(blockNumbers, blockNum)
-
-		var params []interface{}
-		if r.useFinalizedTag && blockNum == endBlock {
-			// Use finalized tag for the last block to ensure reorg safety
-			params = []interface{}{"finalized", false}
-		} else {
-			params = []interface{}{fmt.Sprintf("0x%x", blockNum), false}
-		}
-
-		batchRequests = append(batchRequests, params)
 	}
 
-	// Execute batch request (simplified - in reality we'd need to handle the batch response properly)
-	// For now, we'll process individually to keep it simple
-	// TODO: Implement proper batching when RPC client supports it
+	fetched := 0
 	for _, blockNum := range blockNumbers {
 		// Check context
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return fetched, ctx.Err()
 		default:
 			// Continue
 		}
 
-		// Get block (using individual request for simplicity)
+		log.Debug("resolver fetching block", "block_number", blockNum)
+
 		var params []interface{}
 		if r.useFinalizedTag && blockNum == endBlock {
 			params = []interface{}{"finalized", false}
@@ -278,18 +288,22 @@ func (r *BlockResolver) processBlockBatch(ctx context.Context, startBlock int64,
 
 		block, err := r.rpcClient.BlockByNumber(ctx, rpcBlockNumberFromParams(params))
 		if err != nil {
-			// Log error and continue - in production we'd have better error handling/retry
+			log.Warn("resolver failed to fetch block", "block_number", blockNum, "err", err)
 			continue
 		}
 
 		// Process the block
 		if err := r.processBlock(ctx, block); err != nil {
-			// Log error and continue
+			log.Warn("resolver failed to process block", "block_number", blockNum, "err", err)
 			continue
 		}
+		fetched++
 	}
 
-	return nil
+	log.Info("resolver batch processed", "start_block", startBlock, "end_block", endBlock,
+		"blocks_fetched", fetched, "blocks_requested", len(blockNumbers))
+
+	return fetched, nil
 }
 
 // rpcBlockNumberFromParams extracts block number from params for BlockByNumber call
