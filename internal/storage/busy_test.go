@@ -117,9 +117,10 @@ func TestConcurrentWritersNoBusyError(t *testing.T) {
 	}
 
 	observed, stored, dropped := sto.Stats()
-	// observed counts StartCollectionRun writeReq too, so subtract 1.
-	if observed < 1 {
-		t.Fatalf("observed=%d too low", observed)
+	// With the counter fix, observed counts actual observations, not write requests.
+	// StartCollectionRun has obsCount=0, so no subtraction needed.
+	if int(observed) < totalExpected {
+		t.Fatalf("observed=%d too low (expected >= %d)", observed, totalExpected)
 	}
 	if dropped != 0 {
 		t.Fatalf("expected dropped == 0, got %d", dropped)
@@ -127,13 +128,12 @@ func TestConcurrentWritersNoBusyError(t *testing.T) {
 	if stored != observed {
 		t.Fatalf("stored (%d) != observed (%d); dropped must be 0", stored, observed)
 	}
-	// stored rows = observed writeReqs minus the 1 collection-run req
-	intended := int(observed) - 1
-	if intended != totalExpected {
-		t.Errorf("expected ~%d observation rows, got %d (observed=%d)", totalExpected, intended, observed)
+	// stored rows should equal totalExpected (each observation = 1 row)
+	if int(observed) != totalExpected {
+		t.Errorf("expected %d observation rows, got %d (observed=%d)", totalExpected, observed, observed)
 	}
 
-	t.Logf("observed=%d stored=%d dropped=%d (expected ~%d obs)", observed, stored, dropped, totalExpected)
+	t.Logf("observed=%d stored=%d dropped=%d (expected %d obs)", observed, stored, dropped, totalExpected)
 }
 
 func stoClose(dbPath string) {}

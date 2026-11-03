@@ -60,7 +60,7 @@ func main() {
 		log.SetDefault(log.NewLogger(h))
 
 		// Create observer
-		obs, err := observer.New(cfg)
+		obs, err := observer.New(cfg, configFile)
 		if err != nil {
 			return fmt.Errorf("failed to create observer: %w", err)
 		}

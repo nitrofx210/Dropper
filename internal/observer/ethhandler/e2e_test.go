@@ -11,6 +11,7 @@ import (
 	ethprot "github.com/ethereum/go-ethereum/eth/protocols/eth"
 	"github.com/ethereum/go-ethereum/p2p"
 	"github.com/ethereum/go-ethereum/p2p/enode"
+	"github.com/ethereum/go-ethereum/rlp"
 
 	"github.com/kingd/ethereum-dropper-lab/internal/storage"
 )
@@ -338,4 +339,169 @@ func itob(v uint) string {
 		v /= 10
 	}
 	return string(b)
+}
+
+// TestE2EAnnouncementsBroadcastsPooledResponse tests the full flow:
+// 1. Peer A sends NewPooledTransactionHashes announcement
+// 2. Peer B sends Transactions (full broadcast)
+// 3. Peer C sends PooledTransactions (response to GetPooledTransactions)
+func TestE2EAnnouncementsBroadcastsPooledResponse(t *testing.T) {
+	sto, err := storage.New("file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("failed to open storage: %v", err)
+	}
+	defer sto.Close()
+
+	// Use fetchMode=true to handle PooledTransactions
+	h := New(sto, 1, "test-observer", true, false, 0)
+	h.SetRunContext(1, "test-observer")
+
+	// Set up chain info for handshake
+	genesis := types.NewBlock(&types.Header{
+		Number: common.Big0,
+	}, &types.Body{}, nil, nil)
+	headHash := crypto.Keccak256Hash([]byte("head"))
+	h.SetChainInfo(1, genesis, 100, headHash, 1234567890)
+
+	// Create three peer pipes
+	rwA, rwB := p2p.MsgPipe()
+	rwC, rwD := p2p.MsgPipe()
+	rwE, rwF := p2p.MsgPipe()
+	defer func() {
+		_ = rwA.Close(); _ = rwB.Close()
+		_ = rwC.Close(); _ = rwD.Close()
+		_ = rwE.Close(); _ = rwF.Close()
+	}()
+
+	peerA := p2p.NewPeerPipe(testPeerID(1), "peerA", nil, rwA)
+	peerB := p2p.NewPeerPipe(testPeerID(2), "peerB", nil, rwC)
+	peerC := p2p.NewPeerPipe(testPeerID(3), "peerC", nil, rwE)
+
+	// Test 1: NewPooledTransactionHashes announcement from peer A
+	txHash1 := crypto.Keccak256Hash([]byte("announcement-tx"))
+	announcement := &ethprot.NewPooledTransactionHashesPacket71{
+		Hashes: []common.Hash{txHash1},
+		Types:  []uint8{0},
+		Sizes:  []uint32{0},
+	}
+
+	type sendResult struct{ err error }
+	ch := make(chan sendResult, 1)
+	go func() { ch <- sendResult{err: p2p.Send(rwA, ethprot.NewPooledTransactionHashesMsg, announcement)} }()
+	msg, err := rwB.ReadMsg()
+	if err != nil {
+		t.Fatalf("read announcement: %v", err)
+	}
+	if err := h.handleMessage(peerA, msg, rwA, ethprot.ETH71); err != nil {
+		t.Fatalf("handleMessage announcement: %v", err)
+	}
+	if res := <-ch; res.err != nil {
+		t.Fatalf("peer A send: %v", res.err)
+	}
+
+	// Test 2: Transactions (full broadcast) from peer B
+	tx := types.NewTx(&types.LegacyTx{
+		Nonce:    0,
+		GasPrice: common.Big1,
+		Gas:      21000,
+		To:       func() *common.Address { a := common.HexToAddress("0x1234"); return &a }(),
+		Value:    common.Big1,
+		Data:     nil,
+	})
+	txHash2 := tx.Hash()
+	txList := []*types.Transaction{tx}
+	txListRLP, _ := rlp.EncodeToRawList(txList)
+	var transactionsPkt ethprot.TransactionsPacket
+	// TransactionsPacket embeds RawList, so we copy the encoded data
+	transactionsPkt.AppendList(&txListRLP)
+
+	ch = make(chan sendResult, 1)
+	go func() { ch <- sendResult{err: p2p.Send(rwC, ethprot.TransactionsMsg, &transactionsPkt)} }()
+	msg, err = rwD.ReadMsg()
+	if err != nil {
+		t.Fatalf("read transactions: %v", err)
+	}
+	if err := h.handleMessage(peerB, msg, rwC, ethprot.ETH71); err != nil {
+		t.Fatalf("handleMessage transactions: %v", err)
+	}
+	if res := <-ch; res.err != nil {
+		t.Fatalf("peer B send: %v", res.err)
+	}
+
+	// Test 3: PooledTransactions response from peer C
+	tx3 := types.NewTx(&types.LegacyTx{
+		Nonce:    1,
+		GasPrice: common.Big1,
+		Gas:      21000,
+		To:       func() *common.Address { a := common.HexToAddress("0x5678"); return &a }(),
+		Value:    common.Big1,
+		Data:     nil,
+	})
+	txHash3 := tx3.Hash()
+	tx3List := []*types.Transaction{tx3}
+	tx3ListRLP, _ := rlp.EncodeToRawList(tx3List)
+	pooledPkt := ethprot.PooledTransactionsPacket{
+		RequestId: 1,
+		List:      tx3ListRLP,
+	}
+
+	ch = make(chan sendResult, 1)
+	go func() { ch <- sendResult{err: p2p.Send(rwE, ethprot.PooledTransactionsMsg, &pooledPkt)} }()
+	msg, err = rwF.ReadMsg()
+	if err != nil {
+		t.Fatalf("read pooled transactions: %v", err)
+	}
+	if err := h.handleMessage(peerC, msg, rwE, ethprot.ETH71); err != nil {
+		t.Fatalf("handleMessage pooled transactions: %v", err)
+	}
+	if res := <-ch; res.err != nil {
+		t.Fatalf("peer C send: %v", res.err)
+	}
+
+	// Verify all three observations were stored
+	var totalCount int
+	err = sto.DB().QueryRow(`SELECT COUNT(*) FROM transaction_observations`).Scan(&totalCount)
+	if err != nil {
+		t.Fatalf("query total observations: %v", err)
+	}
+	if totalCount != 3 {
+		t.Errorf("expected 3 total observations, got %d", totalCount)
+	}
+
+	// Verify each tx_hash has exactly one row
+	for _, h := range []common.Hash{txHash1, txHash2, txHash3} {
+		var c int
+		err = sto.DB().QueryRow(`SELECT COUNT(*) FROM transaction_observations WHERE tx_hash = ?`, h.Bytes()).Scan(&c)
+		if err != nil {
+			t.Fatalf("query observation for %x: %v", h, err)
+		}
+		if c != 1 {
+			t.Errorf("expected 1 row for tx %x, got %d", h, c)
+		}
+	}
+
+	// Verify message types are correct
+	var msgTypes []string
+	rows, err := sto.DB().Query(`SELECT message_type FROM transaction_observations ORDER BY observation_id`)
+	if err != nil {
+		t.Fatalf("query message_types: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var mt string
+		if err := rows.Scan(&mt); err != nil {
+			t.Fatalf("scan message_type: %v", err)
+		}
+		msgTypes = append(msgTypes, mt)
+	}
+	// Should have: announcement, direct_broadcast, pooled_tx_response
+	expected := []string{"announcement", "direct_broadcast", "pooled_tx_response"}
+	if len(msgTypes) != 3 {
+		t.Fatalf("expected 3 message types, got %d", len(msgTypes))
+	}
+	for i, mt := range msgTypes {
+		if mt != expected[i] {
+			t.Errorf("observation %d: expected message_type %s, got %s", i, expected[i], mt)
+		}
+	}
 }

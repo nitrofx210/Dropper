@@ -31,9 +31,14 @@ const busyRetries = 3
 // writeReq is a single unit of database work enqueued onto the writer channel.
 // The `do` closure runs inside a single database transaction. If `done` is
 // non-nil, the caller blocks on it to learn the result.
+// obsCount is the number of transaction observations this request represents.
+// For single StoreTxObservation calls, this is 1.
+// For StoreTxObservations batch calls, this is len(obs).
+// For non-observation requests (peer events, collection runs, etc.), this is 0.
 type writeReq struct {
-	do   func(tx *sql.Tx) error
-	done chan error
+	do       func(tx *sql.Tx) error
+	done     chan error
+	obsCount int
 }
 
 // Storage handles persistence of observations to SQLite.
@@ -154,7 +159,7 @@ func (s *Storage) channelSend(req writeReq) error {
 	case s.writeCh <- req:
 		return nil
 	default:
-		atomic.AddUint64(&s.dropped, 1)
+		atomic.AddUint64(&s.dropped, uint64(req.obsCount))
 		return ErrQueueFull
 	}
 }
@@ -203,8 +208,9 @@ func (s *Storage) writerLoop() {
 			if req.done != nil {
 				req.done <- nil
 			}
+			// Increment stored by the number of observations this request represents
+			atomic.AddUint64(&s.stored, uint64(req.obsCount))
 		}
-		atomic.AddUint64(&s.stored, uint64(len(batchCopy)))
 		return nil
 	}
 
@@ -234,7 +240,7 @@ func (s *Storage) writerLoop() {
 				}
 				return
 			}
-			atomic.AddUint64(&s.observed, 1)
+			atomic.AddUint64(&s.observed, uint64(req.obsCount))
 			batch = append(batch, req)
 drain:
 			for len(batch) < writerBatchSize {
@@ -247,7 +253,7 @@ drain:
 						}
 						return
 					}
-					atomic.AddUint64(&s.observed, 1)
+					atomic.AddUint64(&s.observed, uint64(r.obsCount))
 					batch = append(batch, r)
 				default:
 					// channel empty → nothing more to batch right now.
@@ -273,7 +279,8 @@ func (s *Storage) failBatch(batch []writeReq, err error) {
 		if req.done != nil {
 			req.done <- err
 		} else {
-			atomic.AddUint64(&s.dropped, 1)
+			// Increment dropped by the number of observations this request represents
+			atomic.AddUint64(&s.dropped, uint64(req.obsCount))
 		}
 	}
 }
@@ -363,7 +370,8 @@ func (s *Storage) StoreTxObservation(runID int64, observerID string, peerID stri
 			}
 			return nil
 		},
-		done: done,
+		done:     done,
+		obsCount: 1,
 	}
 	if err := s.channelSend(req); err != nil {
 		return err
@@ -431,7 +439,8 @@ func (s *Storage) StoreTxObservations(obs []BatchTxObservation) error {
 			}
 			return nil
 		},
-		done: done,
+		done:     done,
+		obsCount: len(obs),
 	}
 	if err := s.channelSend(req); err != nil {
 		return err
@@ -469,7 +478,8 @@ func (s *Storage) StorePeerEvent(runID int64, observerID string, peerID string, 
 			}
 			return nil
 		},
-		done: done,
+		done:     done,
+		obsCount: 0,
 	}
 	if err := s.channelSend(req); err != nil {
 		return err
@@ -512,7 +522,8 @@ func (s *Storage) StartCollectionRun(run *CollectionRun) (int64, error) {
 			runID = id
 			return nil
 		},
-		done: done,
+		done:     done,
+		obsCount: 0,
 	}
 	if err := s.channelSend(req); err != nil {
 		return 0, err
@@ -560,7 +571,8 @@ func (s *Storage) StoreCollectionRun(run *CollectionRun) error {
 			}
 			return nil
 		},
-		done: done,
+		done:     done,
+		obsCount: 0,
 	}
 	if err := s.channelSend(req); err != nil {
 		return err
@@ -583,7 +595,8 @@ func (s *Storage) UpdateCollectionRunEndTime(runID int64) error {
 			}
 			return nil
 		},
-		done: done,
+		done:     done,
+		obsCount: 0,
 	}
 	if err := s.channelSend(req); err != nil {
 		return err
@@ -638,7 +651,8 @@ func (s *Storage) PersistFinalCounts(runID int64) error {
 			}
 			return nil
 		},
-		done: done,
+		done:     done,
+		obsCount: 0,
 	}
 	if err := s.channelSend(req); err != nil {
 		return err
@@ -1057,7 +1071,8 @@ func (s *Storage) UpdateTrackedTransaction(txHash []byte, lastChecked int64, nex
 			}
 			return nil
 		},
-		done: done,
+		done:     done,
+		obsCount: 0,
 	}
 	if err := s.channelSend(req); err != nil {
 		return err

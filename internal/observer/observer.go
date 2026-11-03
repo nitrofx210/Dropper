@@ -66,13 +66,14 @@ func (r *rateLimiter) take() bool {
 
 // Observer represents the core observer functionality
 type Observer struct {
-	cfg        *config.Config
-	storage    *storage.Storage
-	ethHandler *ethhandler.EthHandler
-	server     *p2p.Server
-	wg         sync.WaitGroup
-	ctx        context.Context
-	cancel     context.CancelFunc
+	cfg            *config.Config
+	configFilePath string // actual --config path used for config_hash
+	storage        *storage.Storage
+	ethHandler     *ethhandler.EthHandler
+	server         *p2p.Server
+	wg             sync.WaitGroup
+	ctx            context.Context
+	cancel         context.CancelFunc
 	// peerDir records whether each known peer is outbound (true) or inbound (false).
 	// Populated from the eth handler via handlePeerDirection, which has the actual
 	// *p2p.Peer (and thus p.Inbound()). Direction for connect/disconnect peer events
@@ -87,7 +88,7 @@ type Observer struct {
 }
 
 // New creates a new Observer instance
-func New(cfg *config.Config) (*Observer, error) {
+func New(cfg *config.Config, configFilePath string) (*Observer, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config is nil")
 	}
@@ -105,9 +106,10 @@ func New(cfg *config.Config) (*Observer, error) {
 
 	// Create observer
 	obs := &Observer{
-		cfg:        cfg,
-		storage:    sto,
-		ethHandler: ethHandler,
+		cfg:            cfg,
+		configFilePath: configFilePath,
+		storage:        sto,
+		ethHandler:     ethHandler,
 	}
 
 	return obs, nil
@@ -138,6 +140,7 @@ func (o *Observer) Start(ctx context.Context) error {
 		"mode", o.cfg.Mode,
 		"tx_dissemination_enabled", o.cfg.TxDisseminationEnabled,
 		"tx_dissemination_rate_limit", o.cfg.TxDisseminationRateLimit,
+		"dial_ratio", o.cfg.DialRatio,
 		"storage_path", o.cfg.StoragePath,
 		"bootnodes_total", len(o.cfg.Bootnodes),
 		"bootnodes_parsed", bootnodesOK,
@@ -150,7 +153,10 @@ func (o *Observer) Start(ctx context.Context) error {
 	// Populate run metadata from the build (collector_git_commit) and the
 	// actual config bytes (config_hash = sha256 of config file), logging
 	// both at startup per review requirement D/E.
-	configFile := "configs/real_run.json"
+	configFile := o.configFilePath
+	if configFile == "" {
+		configFile = "configs/real_run.json" // fallback for backward compatibility
+	}
 	o.cfg.CollectorGitCommit = gitCommit()
 	o.cfg.ConfigHash = configHash(configFile)
 	log.Info("Observer metadata",

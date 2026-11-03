@@ -33,6 +33,7 @@ type Config struct {
 	DialTimeout              time.Duration `json:"dial_timeout"`
 	TxDisseminationEnabled   bool          `json:"tx_dissemination_enabled"`
 	TxDisseminationRateLimit int           `json:"tx_dissemination_rate_limit"` // per second
+	DialRatio              int           `json:"dial_ratio"`                // dial every N peers (default 1 = dial all)
 
 	// Run metadata (for collection_runs row + append-only inclusion labeling)
 	ObserverID       string `json:"observer_id"`
@@ -76,6 +77,7 @@ func MainnetConfig() *Config {
 		DialTimeout:              5 * time.Second,
 		TxDisseminationEnabled:   false,
 		TxDisseminationRateLimit: 10, // 10 per second by default
+		DialRatio:              1,  // dial every peer by default
 
 		// Run metadata defaults
 		ObserverID:       "observer-001",
@@ -142,6 +144,9 @@ func Load(configFile string) (*Config, error) {
 	}
 	if cfg.TxDisseminationRateLimit == 0 {
 		cfg.TxDisseminationRateLimit = defaultCfg.TxDisseminationRateLimit
+	}
+	if cfg.DialRatio == 0 {
+		cfg.DialRatio = defaultCfg.DialRatio
 	}
 	if cfg.ObserverID == "" {
 		cfg.ObserverID = defaultCfg.ObserverID

@@ -182,10 +182,11 @@ func ProtocolLength(version uint) uint64 {
 // (p2p.Send(p.rw, StatusMsg, pkt) at handshake.go:57), then read and validate
 // the peer's Status. Network ID, genesis and ForkID mismatches cause disconnect
 // rather than letting the peer linger.
-func (h *EthHandler) doHandshake(p *p2p.Peer, rw p2p.MsgReadWriter, version uint) error {
+// Returns the peer's StatusPacket so the caller can access peer's head info.
+func (h *EthHandler) doHandshake(p *p2p.Peer, rw p2p.MsgReadWriter, version uint) (*ethprot.StatusPacket, error) {
 	genesis := h.genesis
 	if genesis == nil {
-		return errors.New("eth handshake: genesis block not configured")
+		return nil, errors.New("eth handshake: genesis block not configured")
 	}
 
 	// Compute the live ForkID from the head block we fetched via RPC, matching
@@ -204,7 +205,7 @@ func (h *EthHandler) doHandshake(p *p2p.Peer, rw p2p.MsgReadWriter, version uint
 		LatestBlockHash: h.latestBlockHash,
 	}
 	if err := p2p.Send(rw, ethprot.StatusMsg, pkt); err != nil {
-		return fmt.Errorf("failed to send eth Status: %w", err)
+		return nil, fmt.Errorf("failed to send eth Status: %w", err)
 	}
 	log.Info("Sent eth Status", "peer", p.ID(), "version", version, "network_id", h.networkID, "genesis", h.genesisHash.Hex(), "latest_block", h.latestBlock)
 
@@ -212,22 +213,22 @@ func (h *EthHandler) doHandshake(p *p2p.Peer, rw p2p.MsgReadWriter, version uint
 	var peerStatus ethprot.StatusPacket
 	msg, err := rw.ReadMsg()
 	if err != nil {
-		return fmt.Errorf("failed to read peer Status: %w", err)
+		return nil, fmt.Errorf("failed to read peer Status: %w", err)
 	}
 	if err := msg.Decode(&peerStatus); err != nil {
-		return fmt.Errorf("failed to decode peer Status: %w", err)
+		return nil, fmt.Errorf("failed to decode peer Status: %w", err)
 	}
 	if peerStatus.NetworkID != h.networkID {
-		return fmt.Errorf("network ID mismatch: peer %d != ours %d", peerStatus.NetworkID, h.networkID)
+		return nil, fmt.Errorf("network ID mismatch: peer %d != ours %d", peerStatus.NetworkID, h.networkID)
 	}
 	if uint(peerStatus.ProtocolVersion) != version {
-		return fmt.Errorf("protocol version mismatch: peer %d != ours %d", peerStatus.ProtocolVersion, version)
+		return nil, fmt.Errorf("protocol version mismatch: peer %d != ours %d", peerStatus.ProtocolVersion, version)
 	}
 	if peerStatus.Genesis != h.genesisHash {
-		return fmt.Errorf("genesis mismatch: peer %x != ours %x", peerStatus.Genesis, h.genesisHash)
+		return nil, fmt.Errorf("genesis mismatch: peer %x != ours %x", peerStatus.Genesis, h.genesisHash)
 	}
 	log.Info("Received peer eth Status", "peer", p.ID(), "version", peerStatus.ProtocolVersion, "network_id", peerStatus.NetworkID, "genesis", peerStatus.Genesis.Hex(), "latest_block", peerStatus.LatestBlock)
-	return nil
+	return &peerStatus, nil
 }
 
 // parseClient splits an advertised peer name like "Geth/v1.17.7-stable/..."
@@ -251,7 +252,8 @@ func (h *EthHandler) handle(p *p2p.Peer, rw p2p.MsgReadWriter, version uint) err
 	// Status first (peer waits for it per eth/protocols/eth/handshake.go:57),
 	// then read and validate the peer's Status. Without this the peer and we
 	// both wait for the other to send Status first and the connection drops.
-	if err := h.doHandshake(p, rw, version); err != nil {
+	peerStatus, err := h.doHandshake(p, rw, version)
+	if err != nil {
 		log.Error("eth handshake failed", "peer", p.ID(), "version", version, "err", err)
 		// Do NOT write a disconnect peer_event here: the p2p server emits exactly
 		// one PeerEventTypeDrop per connection, which the observer's event consumer
@@ -270,16 +272,27 @@ func (h *EthHandler) handle(p *p2p.Peer, rw p2p.MsgReadWriter, version uint) err
 	}
 	clientName, clientVersion := parseClient(p.Fullname())
 
+	// Peer's head from their Status handshake
+	peerHeadNum := peerStatus.LatestBlock
+	peerHeadHash := peerStatus.LatestBlockHash
+	// Lag: our head - peer's head (positive = peer is behind us)
+	lag := int64(h.latestBlock) - int64(peerHeadNum)
+
 	headLog := fmt.Sprintf("block %d (%x)", h.latestBlock, h.latestBlockHash[:4])
+	peerHeadLog := fmt.Sprintf("block %d (%x)", peerHeadNum, peerHeadHash[:4])
 	log.Info("eth handshake ok",
 		"peer", shortID,
 		"client_name", clientName,
 		"client_version", clientVersion,
 		"eth_version", version,
-		"head", headLog,
+		"our_head", headLog,
+		"peer_head", peerHeadLog,
+		"lag_blocks", lag,
 		"remote", remoteAddr,
 	)
-	h.storePeerEvent(p, "handshake_ok", int(version), clientName, clientVersion, fmt.Sprintf("version %d head %s peer %x", version, headLog, id[:4]))
+	// Store peer's head and lag in detail_json for analysis
+	detailJSON := fmt.Sprintf(`{"version":%d,"our_head_number":%d,"our_head_hash":"%x","peer_head_number":%d,"peer_head_hash":"%x","lag_blocks":%d,"peer":"%x"}`, version, h.latestBlock, h.latestBlockHash[:4], peerHeadNum, peerHeadHash[:4], lag, id[:4])
+	h.storePeerEvent(p, "handshake_ok", int(version), clientName, clientVersion, detailJSON)
 
 	// Record when this connection's handshake completed so later observations
 	// can report their connection age without joining peer_events.
