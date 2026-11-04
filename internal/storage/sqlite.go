@@ -80,6 +80,61 @@ func (s *Storage) Stored() uint64 { return atomic.LoadUint64(&s.stored) }
 // Dropped returns the total observations dropped (queue full or retries exhausted).
 func (s *Storage) Dropped() uint64 { return atomic.LoadUint64(&s.dropped) }
 
+// NewForTest creates a new Storage instance with a custom write channel size
+// for testing backpressure and drops.
+func NewForTest(dbPath string, writeChanSize int) (*Storage, error) {
+	// Ensure directory exists
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+		return nil, fmt.Errorf("failed to create db directory: %w", err)
+	}
+
+	// DSN with WAL, synchronous=NORMAL, busy_timeout. Preserve any existing
+	// query string (e.g. "file::memory:?cache=shared") by appending with "&".
+	sep := "?"
+	if strings.Contains(dbPath, "?") {
+		sep = "&"
+	}
+	dsn := fmt.Sprintf("%s%s_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=10000", dbPath, sep)
+
+	// Open database connection
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open database: %w", err)
+	}
+
+	// Test connection
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to ping database: %w", err)
+	}
+
+	// Confirm WAL is active.
+	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to set WAL mode: %w", err)
+	}
+
+	// Initialize schema
+	if err := initSchema(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to initialize schema: %w", err)
+	}
+
+	// One writer goroutine owns all writes. SetMaxOpenConns(1) guarantees the
+	// sql layer never hands out more than one connection, so we can never have
+	// two concurrent writers fighting for the DB lock.
+	db.SetMaxOpenConns(1)
+
+	s := &Storage{
+		db:          db,
+		writeCh:     make(chan writeReq, writeChanSize),
+		closeWriter: make(chan struct{}),
+		writerDone:  make(chan struct{}),
+	}
+	go s.writerLoop()
+	return s, nil
+}
+
 // New creates a new Storage instance.
 //
 // The DSN includes WAL mode, synchronous=NORMAL, and busy_timeout>=10000ms so
@@ -154,12 +209,20 @@ func (s *Storage) Close() error {
 // is full, the observation is counted as dropped and the caller gets
 // ErrQueueFull. Every write (tx observation, peer event, collection run,
 // heartbeat, end time) goes through here — there is exactly one writer.
+// observed is incremented at enqueue attempt so observed == stored + dropped always holds.
 func (s *Storage) channelSend(req writeReq) error {
+	// Count as observed at enqueue attempt (before channel send)
+	if req.obsCount > 0 {
+		atomic.AddUint64(&s.observed, uint64(req.obsCount))
+	}
 	select {
 	case s.writeCh <- req:
 		return nil
 	default:
-		atomic.AddUint64(&s.dropped, uint64(req.obsCount))
+		// Dropped at enqueue: count as dropped (observed already incremented)
+		if req.obsCount > 0 {
+			atomic.AddUint64(&s.dropped, uint64(req.obsCount))
+		}
 		return ErrQueueFull
 	}
 }
@@ -240,7 +303,6 @@ func (s *Storage) writerLoop() {
 				}
 				return
 			}
-			atomic.AddUint64(&s.observed, uint64(req.obsCount))
 			batch = append(batch, req)
 drain:
 			for len(batch) < writerBatchSize {
@@ -253,7 +315,6 @@ drain:
 						}
 						return
 					}
-					atomic.AddUint64(&s.observed, uint64(r.obsCount))
 					batch = append(batch, r)
 				default:
 					// channel empty → nothing more to batch right now.
