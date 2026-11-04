@@ -401,7 +401,7 @@ func main() {
 	// Print results as markdown table
 	fmt.Println("\n# RPC Endpoint Test Results")
 	fmt.Printf("**Date**: %s\n", time.Now().Format("2006-01-02"))
-	fmt.Println("**Network**: Ethereum Mainnet\n")
+	fmt.Println("**Network**: Ethereum Mainnet")
 
 	fmt.Println("| Endpoint | URL | Sustained Rate (req/s) | Rate Limit Point | Latency Median | Latency P95 | Error Rate | Batch Supported | Max Batch Size | Safe Tag | Finalized Tag | Head Lag | Hash Consistency |")
 	fmt.Println("|----------|-----|------------------------|------------------|----------------|-------------|------------|-----------------|----------------|----------|---------------|----------|------------------|")
