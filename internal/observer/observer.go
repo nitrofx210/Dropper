@@ -463,15 +463,23 @@ func (o *Observer) initP2PServer() (bootnodesOK, bootnodesSkipped, staticNodesOK
 		BootstrapNodes: bootstrapNodes,    // Wire from cfg.Bootnodes
 		StaticNodes:    staticNodes,       // Wire from cfg.StaticNodes
 		MaxPeers:       o.cfg.MaxPeers,    // Apply configured max peers
+		DialRatio:      o.cfg.DialRatio,   // Dial every N peers (default 2 = 50% inbound)
 	}
 
 	// Create server
 	srv := &p2p.Server{Config: srvConfig}
 	o.server = srv
 
+	// Compute effective dial limits from the server config
+	maxDialed := srv.MaxDialedConns()
+	maxInbound := srv.MaxInboundConns()
+
 	log.Info("P2P effective settings",
 		"listen_addr", listenAddr,
 		"max_peers", o.cfg.MaxPeers,
+		"dial_ratio", o.cfg.DialRatio,
+		"max_dialed_conns", maxDialed,
+		"max_inbound_conns", maxInbound,
 		"no_discovery", o.cfg.NoDiscovery,
 		"discovery_v4", true,
 		"discovery_v5", true,

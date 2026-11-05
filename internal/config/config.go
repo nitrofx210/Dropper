@@ -77,7 +77,7 @@ func MainnetConfig() *Config {
 		DialTimeout:              5 * time.Second,
 		TxDisseminationEnabled:   false,
 		TxDisseminationRateLimit: 10, // 10 per second by default
-		DialRatio:              1,  // dial every peer by default
+		DialRatio:              2,  // dial every 2 peers (50% inbound) — ratio 1 allows zero inbound
 
 		// Run metadata defaults
 		ObserverID:       "observer-001",
