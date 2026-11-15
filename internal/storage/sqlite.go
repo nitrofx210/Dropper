@@ -1154,3 +1154,57 @@ func (s *Storage) GetLastResolverRunID() (int64, error) {
 	return nullID.Int64, nil
 }
 
+// CreateResolverRun creates a new resolver run entry and returns its ID.
+func (s *Storage) CreateResolverRun(observerID, gethLibVersion, goBuildVersion, configHash, schemaVersion, notes string) (int64, error) {
+	startNs := time.Now().UnixNano()
+	result, err := s.db.Exec(`
+		INSERT INTO resolver_runs (start_ns, observer_id, geth_lib_version, go_build_version, config_hash, schema_version, notes)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, startNs, observerID, gethLibVersion, goBuildVersion, configHash, schemaVersion, notes)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create resolver run: %w", err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get resolver run ID: %w", err)
+	}
+	return id, nil
+}
+
+// GetResolverRun gets the resolver run by ID.
+func (s *Storage) GetResolverRun(runID int64) (startNs, endNs int64, err error) {
+	var sNs, eNs sql.NullInt64
+	err = s.db.QueryRow(`SELECT start_ns, end_ns FROM resolver_runs WHERE run_id = ?`, runID).Scan(&sNs, &eNs)
+	if err != nil {
+		return 0, 0, err
+	}
+	if sNs.Valid {
+		startNs = sNs.Int64
+	}
+	if eNs.Valid {
+		endNs = eNs.Int64
+	}
+	return startNs, endNs, nil
+}
+
+// UpdateResolverRunEnd updates the end time of a resolver run.
+func (s *Storage) UpdateResolverRunEnd(runID int64, endNs int64) error {
+	_, err := s.db.Exec(`UPDATE resolver_runs SET end_ns = ? WHERE run_id = ?`, endNs, runID)
+	return err
+}
+
+// GetResolverCheckpoint gets the last processed block for a resolver run.
+func (s *Storage) GetResolverCheckpoint(runID int64) (int64, error) {
+	var block sql.NullInt64
+	err := s.db.QueryRow(`
+		SELECT MAX(block_number) FROM transaction_inclusion WHERE resolve_run_id = ?
+	`, runID).Scan(&block)
+	if err != nil {
+		return 0, err
+	}
+	if !block.Valid {
+		return 0, nil
+	}
+	return block.Int64, nil
+}
+

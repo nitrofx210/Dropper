@@ -69,63 +69,100 @@ func (r *BlockResolver) Close() {
 
 // Run starts the block resolver loop
 func (r *BlockResolver) Run(ctx context.Context) error {
-	// Resolve the resolver run id used to label append-only inclusion rows (point 2).
-	// Falls back to 0 when no resolver run has been recorded yet.
-	lastRunID, err := r.storage.GetLastResolverRunID()
-	if err != nil {
-		return err
-	}
-	r.resolverRunID = lastRunID
-
+	// Get collection run times to determine block range
 	startTime, endTime, err := r.storage.GetLastRunTimes()
 	if err != nil {
 		return err
+	}
+	if startTime == 0 && endTime == 0 {
+		log.Warn("resolver empty block range: no collection runs found")
+		return nil
 	}
 	log.Info("resolver run times resolved", "start_ns", startTime, "end_ns", endTime,
 		"start_sec", startTime/int64(time.Second), "end_sec", endTime/int64(time.Second),
 		"span_s", (endTime-startTime)/int64(time.Second))
 
-	// Get the last processed block from checkpoint (if any)
-	lastProcessedBlock, err := r.getCheckpointBlock(ctx)
-	if err != nil {
-		return err
-	}
-
-	// Determine block range to process
-	startBlock, endBlock, err := r.determineBlockRange(ctx, lastProcessedBlock)
+	// Determine block range from collection run times (without checkpoint first)
+	startBlock, endBlock, err := r.determineBlockRange(ctx)
 	if err != nil {
 		return err
 	}
 	log.Info("resolver block range resolved", "start_block", startBlock, "end_block", endBlock,
 		"blocks", endBlock-startBlock+1)
 
-	// Empty range: nothing to process — exit quickly rather than silently returning RC=0.
 	if startBlock == 0 && endBlock == 0 {
 		log.Warn("resolver empty block range: no blocks to process", "start_block", startBlock, "end_block", endBlock)
 		return nil
 	}
 
+	// Check for existing incomplete resolver run to resume
+	lastRunID, err := r.storage.GetLastResolverRunID()
+	if err != nil {
+		return err
+	}
+
+	var resumeFromBlock int64 = startBlock
+	if lastRunID > 0 {
+		// Check if the last run has processed any blocks
+		checkpoint, err := r.storage.GetResolverCheckpoint(lastRunID)
+		if err != nil {
+			return err
+		}
+		if checkpoint > 0 {
+			// Resume from the next block after the last processed one
+			resumeFromBlock = checkpoint + 1
+			r.resolverRunID = lastRunID
+			log.Info("resuming existing resolver run", "run_id", lastRunID, "resume_from_block", resumeFromBlock)
+		}
+	}
+
+	// If no existing run to resume, create a new resolver run
+	if r.resolverRunID == 0 {
+		// Get config info from storage or use defaults
+		observerID := "observer-001"
+		gethLibVersion := "go-ethereum/v1.17.7"
+		goBuildVersion := "go1.26.5"
+		configHash := ""
+		schemaVersion := "1"
+		notes := "block resolver run"
+
+		runID, err := r.storage.CreateResolverRun(observerID, gethLibVersion, goBuildVersion, configHash, schemaVersion, notes)
+		if err != nil {
+			return err
+		}
+		r.resolverRunID = runID
+		log.Info("created new resolver run", "run_id", runID)
+	}
+
+	// Ensure we don't process before the determined start block
+	if resumeFromBlock < startBlock {
+		resumeFromBlock = startBlock
+	}
+
+	// Validate range
+	if resumeFromBlock > endBlock {
+		log.Info("resolver nothing to process: already up to date", "resume_from", resumeFromBlock, "end_block", endBlock)
+		// Mark run as complete
+		r.storage.UpdateResolverRunEnd(r.resolverRunID, time.Now().UnixNano())
+		return nil
+	}
+
+	log.Info("resolver processing blocks", "start_block", resumeFromBlock, "end_block", endBlock)
+
 	// Process blocks in batches
-	blocksFetched, err := r.processBlockRange(ctx, startBlock, endBlock)
+	blocksFetched, err := r.processBlockRange(ctx, resumeFromBlock, endBlock)
 	if err != nil {
 		return err
 	}
 	log.Info("resolver block range processed", "blocks_fetched", blocksFetched,
-		"start_block", startBlock, "end_block", endBlock)
+		"start_block", resumeFromBlock, "end_block", endBlock)
 
-	// Update checkpoint
-	if err := r.updateCheckpoint(ctx, endBlock); err != nil {
+	// Mark resolver run as complete
+	if err := r.storage.UpdateResolverRunEnd(r.resolverRunID, time.Now().UnixNano()); err != nil {
 		return err
 	}
 
 	return nil
-}
-
-// getCheckpointBlock retrieves the last successfully processed block number
-func (r *BlockResolver) getCheckpointBlock(ctx context.Context) (int64, error) {
-	// For now, we'll start from beginning - in a full implementation this would read from a checkpoint file
-	// TODO: Implement proper checkpointing to disk
-	return 0, nil
 }
 
 // preRunMarginSec is how far before the run's start time we begin scanning blocks
@@ -134,7 +171,7 @@ const preRunMarginSec = 300 // 5 minutes
 
 // determineBlockRange calculates the start and end blocks to process based on collection run times.
 // Uses binary search on block timestamps instead of a fixed 12s-per-block estimate (point 5).
-func (r *BlockResolver) determineBlockRange(ctx context.Context, lastProcessedBlock int64) (int64, int64, error) {
+func (r *BlockResolver) determineBlockRange(ctx context.Context) (int64, int64, error) {
 	startTime, endTime, err := r.storage.GetLastRunTimes()
 	if err != nil {
 		return 0, 0, err
@@ -159,11 +196,6 @@ func (r *BlockResolver) determineBlockRange(ctx context.Context, lastProcessedBl
 	endBlock, err := r.findBlockAtTime(ctx, endSearchSec)
 	if err != nil {
 		return 0, 0, err
-	}
-
-	// Ensure we don't process blocks we've already processed
-	if lastProcessedBlock >= startBlock {
-		startBlock = lastProcessedBlock + 1
 	}
 
 	// Validate range
@@ -508,13 +540,6 @@ func (r *BlockResolver) storeInclusionResult(txHash []byte, runID int64, blockNu
     )
 
     return err
-}
-
-// updateCheckpoint updates the last processed block checkpoint
-func (r *BlockResolver) updateCheckpoint(ctx context.Context, lastProcessedBlock int64) error {
-	// TODO: Implement proper checkpointing to disk or database
-	// For now, this is a placeholder
-	return nil
 }
 
 // sqlBoolPtr creates a sql.NullBool from a bool pointer
