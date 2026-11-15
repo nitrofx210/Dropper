@@ -17,14 +17,14 @@ import (
 
 // BlockResolver resolves transaction inclusion using block-based fetching
 type BlockResolver struct {
-	storage              *storage.Storage
-	rpcClient            *ethclient.Client
-	batchSize            int
+	storage               *storage.Storage
+	rpcClient             *ethclient.Client
+	batchSize             int
 	maxConcurrentRequests int
-	postRunMarginSec     int64
-	useFinalizedTag      bool
-	confirmationDepth    int64
-	resolverRunID        int64 // per-execution resolver run id (point 2: separate from collection run id)
+	postRunMarginSec      int64
+	useFinalizedTag       bool
+	confirmationDepth     int64
+	resolverRunID         int64 // per-execution resolver run id (point 2: separate from collection run id)
 }
 
 
@@ -52,13 +52,13 @@ func NewBlockResolver(sto *storage.Storage, rpcEndpoint string, batchSize int, m
 	}
 
 	return &BlockResolver{
-		storage:              sto,
-		rpcClient:            client,
-		batchSize:            batchSize,
+		storage:               sto,
+		rpcClient:             client,
+		batchSize:             batchSize,
 		maxConcurrentRequests: maxConcurrentRequests,
-		postRunMarginSec:     postRunMarginSec,
-		useFinalizedTag:      true, // Default to using finalized tag as per design
-		confirmationDepth:    64,   // Default confirmation depth (2 epochs)
+		postRunMarginSec:      postRunMarginSec,
+		useFinalizedTag:       true, // Default to using finalized tag as per design
+		confirmationDepth:     64,   // Default confirmation depth (2 epochs)
 	}, nil
 }
 
@@ -414,12 +414,20 @@ func (r *BlockResolver) processBlock(ctx context.Context, block *types.Block) er
 	}
 	defer rows.Close()
 
-	// Create a map for fast lookup of matching transactions
-	txHashMap := make(map[string]*storage.TrackedTransaction)
+	// Use a slice instead of map for memory efficiency (typical matches ~130/block).
+	// Linear search is cache-friendly and avoids map overhead (key strings, pointers).
+	type trackedMatch struct {
+		txHash           []byte
+		firstSeenNs      int64
+		included         *bool
+		blockNumberPtr   *int64
+		transactionIndex *int64
+	}
+	matches := make([]trackedMatch, 0, 256)
 	for rows.Next() {
 		var txHash []byte
 		var firstSeenNs, lastCheckedNs, nextCheckNs, attempt int64
-		var includedInt sql.NullInt64 // 0 = false, 1 = true, NULL = unknown
+		var includedInt sql.NullInt64
 		var blockNumber sql.NullInt64
 		var blockHash []byte
 		var transactionIndex sql.NullInt64
@@ -441,66 +449,76 @@ func (r *BlockResolver) processBlock(ctx context.Context, block *types.Block) er
 		if transactionIndex.Valid {
 			transactionIndexPtr = &transactionIndex.Int64
 		}
-		var usefulScorePtr *float64
-		if usefulScore.Valid {
-			usefulScorePtr = &usefulScore.Float64
-		}
-		txHashMap[hex.EncodeToString(txHash)] = &storage.TrackedTransaction{
-			TxHash:          txHash,
-			FirstSeenNs:     firstSeenNs,
-			LastCheckedNs:   lastCheckedNs,
-			NextCheckNs:     nextCheckNs,
-			Attempt:         int(attempt),
-			Included:        included,
-			BlockNumber:     blockNumberPtr,
-			BlockHash:       blockHash,
-			TransactionIndex:transactionIndexPtr,
-			UsefulScore:     usefulScorePtr,
-		}
+		// Only store fields needed for inclusion decision
+		matches = append(matches, trackedMatch{
+			txHash:           txHash,
+			firstSeenNs:      firstSeenNs,
+			included:         included,
+			blockNumberPtr:   blockNumberPtr,
+			transactionIndex: transactionIndexPtr,
+		})
 	}
 	if err = rows.Err(); err != nil {
 		return fmt.Errorf("error iterating tracked transactions: %w", err)
 	}
 
-	log.Debug("Found tracked transactions in block", "count", len(txHashMap))
+	log.Debug("Found tracked transactions in block", "count", len(matches))
 
 	// Check each transaction in the block against our tracked transactions.
-// Point 4: inclusion facts (block number, hash, timestamp) are stored
-// UNCONDITIONALLY for every tracked transaction found in a block.
-// Point 4: "first_seen < block time" is a SEPARATE derived flag (recorded as
-// inclusion_flag), not part of the inclusion storage decision.
-// Point 6: the resolver never writes to tracked_transactions or any observation
-// table — it only writes to transaction_inclusion.
-for i, txHash := range txHashes {
-    txHashHex := hex.EncodeToString(txHash)
-    if trackedTx, exists := txHashMap[txHashHex]; exists {
-        blockTimeNs := int64(block.Time()) * int64(time.Second)
+	// Point 4: inclusion facts (block number, hash, timestamp) are stored
+	// UNCONDITIONALLY for every tracked transaction found in a block.
+	// Point 4: "first_seen < block time" is a SEPARATE derived flag (recorded as
+	// inclusion_flag), not part of the inclusion storage decision.
+	// Point 6: the resolver never writes to tracked_transactions or any observation
+	// table — it only writes to transaction_inclusion.
+	blockTimeNs := int64(block.Time()) * int64(time.Second)
+	for i, txHash := range txHashes {
+		// Linear search - fast for small match sets (~130 typical)
+		for _, m := range matches {
+			if bytesEqual(txHash, m.txHash) {
+				// Derived flag: was the transaction first seen before this block's time?
+				firstSeenBeforeBlock := m.firstSeenNs < blockTimeNs
 
-        // Derived flag: was the transaction first seen before this block's time?
-        // This is separate from the inclusion storage decision itself.
-        firstSeenBeforeBlock := trackedTx.FirstSeenNs < blockTimeNs
+				// Store inclusion fact unconditionally (points 4 & 6).
+				if err := r.storeInclusionResult(
+					m.txHash,
+					r.resolverRunID,
+					blockNumber,
+					blockHash,
+					int64(i),
+					blockTimeNs,
+					time.Now().UnixNano(),
+					firstSeenBeforeBlock,
+				); err != nil {
+					return err
+				}
 
-        // Store inclusion fact unconditionally (points 4 & 6).
-        if err := r.storeInclusionResult(
-            trackedTx.TxHash,
-            r.resolverRunID,
-            blockNumber,
-            blockHash,
-            int64(i),
-            blockTimeNs,
-            time.Now().UnixNano(),
-            firstSeenBeforeBlock,
-        ); err != nil {
-            return err
-        }
+				log.Debug("Stored inclusion fact", "tx_hash", hex.EncodeToString(txHash), "block_number", blockNumber,
+					"first_seen_before_block", firstSeenBeforeBlock)
+				break
+			}
+		}
+		// If transaction not in our tracked set, we ignore it (not our concern).
+	}
 
-        log.Debug("Stored inclusion fact", "tx_hash", txHashHex, "block_number", blockNumber,
-            "first_seen_before_block", firstSeenBeforeBlock)
-    }
-    // If transaction not in our tracked set, we ignore it (not our concern).
+	// Explicitly clear slices to help GC (ponytail: manual clear for memory pressure)
+	txHashes = nil
+	matches = nil
+
+	return nil
 }
 
-return nil
+// bytesEqual compares two byte slices for equality.
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // storeInclusionResult stores the inclusion result in the transaction_inclusion table.
@@ -510,36 +528,36 @@ return nil
 // The deliveredBeforeBlock parameter records the derived "first_seen < block time" flag
 // (separate from the unconditional inclusion fact storage, point 4).
 func (r *BlockResolver) storeInclusionResult(txHash []byte, runID int64, blockNumber uint64, blockHash []byte, txIndex int64, inclusionTimeNs int64, finalizedCheckedAtNs int64, deliveredBeforeBlock bool) error {
-    // Calculate derived finalization estimate (block timestamp + ~13 minutes)
-    const halfLifeSeconds = int64(780) // ~13 minutes
-    finalizationEstimateNs := inclusionTimeNs + (halfLifeSeconds * int64(time.Second))
+	// Calculate derived finalization estimate (block timestamp + ~13 minutes)
+	const halfLifeSeconds = int64(780) // ~13 minutes
+	finalizationEstimateNs := inclusionTimeNs + (halfLifeSeconds * int64(time.Second))
 
-    var includedInt int64 = 0
-    if deliveredBeforeBlock {
-        includedInt = 1
-    }
+	var includedInt int64 = 0
+	if deliveredBeforeBlock {
+		includedInt = 1
+	}
 
-    _, err := r.storage.DB().Exec(`
-        INSERT INTO transaction_inclusion (
-            tx_hash, resolve_run_id, block_number, block_hash,
-            inclusion_time_ns, finalized_checked_at_ns, finalization_estimate_ns,
-            lookup_source, last_lookup_ns, lookup_attempts, delivered_before_block
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `,
-        txHash,
-        runID,
-        blockNumber,
-        blockHash,
-        inclusionTimeNs,
-        finalizedCheckedAtNs,
-        finalizationEstimateNs,
-        "rpc_block",
-        finalizedCheckedAtNs,
-        1,
-        includedInt,
-    )
+	_, err := r.storage.DB().Exec(`
+		INSERT INTO transaction_inclusion (
+			tx_hash, resolve_run_id, block_number, block_hash,
+			inclusion_time_ns, finalized_checked_at_ns, finalization_estimate_ns,
+			lookup_source, last_lookup_ns, lookup_attempts, delivered_before_block
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		txHash,
+		runID,
+		blockNumber,
+		blockHash,
+		inclusionTimeNs,
+		finalizedCheckedAtNs,
+		finalizationEstimateNs,
+		"rpc_block",
+		finalizedCheckedAtNs,
+		1,
+		includedInt,
+	)
 
-    return err
+	return err
 }
 
 // sqlBoolPtr creates a sql.NullBool from a bool pointer
