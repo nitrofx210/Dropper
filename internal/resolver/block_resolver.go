@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/kingd/ethereum-dropper-lab/internal/storage"
 )
@@ -26,7 +26,6 @@ type BlockResolver struct {
 	confirmationDepth     int64
 	resolverRunID         int64 // per-execution resolver run id (point 2: separate from collection run id)
 }
-
 
 // NewBlockResolver creates a new BlockResolver instance
 func NewBlockResolver(sto *storage.Storage, rpcEndpoint string, batchSize int, maxConcurrentRequests int, postRunMarginSec int64) (*BlockResolver, error) {
@@ -311,14 +310,19 @@ func (r *BlockResolver) processBlockBatch(ctx context.Context, startBlock int64,
 
 		log.Debug("resolver fetching block", "block_number", blockNum)
 
-		var params []interface{}
+		var block *types.Block
+		var err error
+
+		// Handle finalized tag for the last block in batch
 		if r.useFinalizedTag && blockNum == endBlock {
-			params = []interface{}{"finalized", false}
+			// Use raw RPC call to get finalized block (eth_getBlockByNumber accepts "finalized" tag)
+			var rawBlock types.Block
+			err = r.rpcClient.Client().CallContext(ctx, &rawBlock, "eth_getBlockByNumber", "finalized", false)
+			block = &rawBlock
 		} else {
-			params = []interface{}{fmt.Sprintf("0x%x", blockNum), false}
+			block, err = r.rpcClient.BlockByNumber(ctx, big.NewInt(blockNum))
 		}
 
-		block, err := r.rpcClient.BlockByNumber(ctx, rpcBlockNumberFromParams(params))
 		if err != nil {
 			log.Warn("resolver failed to fetch block", "block_number", blockNum, "err", err)
 			continue
@@ -588,15 +592,19 @@ func (r *BlockResolver) processBlockRangeAlternative(ctx context.Context, startB
 			// Continue
 		}
 
-		// Get block
-		var params []interface{}
+		var block *types.Block
+		var err error
+
+		// Handle finalized tag for the last block in batch
 		if r.useFinalizedTag && blockNum == endBlock {
-			params = []interface{}{"finalized", false}
+			// Use raw RPC call to get finalized block (eth_getBlockByNumber accepts "finalized" tag)
+			var rawBlock types.Block
+			err = r.rpcClient.Client().CallContext(ctx, &rawBlock, "eth_getBlockByNumber", "finalized", false)
+			block = &rawBlock
 		} else {
-			params = []interface{}{fmt.Sprintf("0x%x", blockNum), false}
+			block, err = r.rpcClient.BlockByNumber(ctx, big.NewInt(blockNum))
 		}
 
-		block, err := r.rpcClient.BlockByNumber(ctx, rpcBlockNumberFromParams(params))
 		if err != nil {
 			continue
 		}
