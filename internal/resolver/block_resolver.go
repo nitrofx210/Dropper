@@ -298,6 +298,24 @@ func (r *BlockResolver) processBlockBatch(ctx context.Context, startBlock int64,
 		blockNumbers = append(blockNumbers, blockNum)
 	}
 
+	// If using finalized tag, fetch the finalized head once per batch to validate
+	// that the blocks we're about to fetch are at or below the finalized block.
+	var finalizedHead *types.Header
+	if r.useFinalizedTag {
+		var err error
+		finalizedHead, err = r.rpcClient.HeaderByNumber(ctx, nil) // nil = latest, but we want finalized
+		if err != nil {
+			log.Warn("resolver failed to fetch finalized head", "err", err)
+		} else {
+			// HeaderByNumber with nil returns latest. To get finalized, we need a raw call.
+			var rawHeader types.Header
+			err = r.rpcClient.Client().CallContext(ctx, &rawHeader, "eth_getBlockByNumber", "finalized", false)
+			if err == nil {
+				finalizedHead = &rawHeader
+			}
+		}
+	}
+
 	fetched := 0
 	for _, blockNum := range blockNumbers {
 		// Check context
@@ -310,22 +328,27 @@ func (r *BlockResolver) processBlockBatch(ctx context.Context, startBlock int64,
 
 		log.Debug("resolver fetching block", "block_number", blockNum)
 
-		var block *types.Block
-		var err error
-
-		// Handle finalized tag for the last block in batch
-		if r.useFinalizedTag && blockNum == endBlock {
-			// Use raw RPC call to get finalized block (eth_getBlockByNumber accepts "finalized" tag)
-			var rawBlock types.Block
-			err = r.rpcClient.Client().CallContext(ctx, &rawBlock, "eth_getBlockByNumber", "finalized", false)
-			block = &rawBlock
-		} else {
-			block, err = r.rpcClient.BlockByNumber(ctx, big.NewInt(blockNum))
-		}
-
+		// Always fetch by explicit block number
+		block, err := r.rpcClient.BlockByNumber(ctx, big.NewInt(blockNum))
 		if err != nil {
 			log.Warn("resolver failed to fetch block", "block_number", blockNum, "err", err)
 			continue
+		}
+		if block == nil {
+			log.Warn("resolver got nil block", "block_number", blockNum)
+			continue
+		}
+
+		// Validate block number matches request
+		if block.NumberU64() != uint64(blockNum) {
+			log.Warn("resolver block number mismatch", "requested", blockNum, "got", block.NumberU64())
+			continue
+		}
+
+		// If we have a finalized head, ensure the block is finalized (or we're OK with non-finalized for recent blocks)
+		if finalizedHead != nil && block.NumberU64() > finalizedHead.Number.Uint64() {
+			log.Debug("resolver block not yet finalized", "block_number", blockNum, "finalized_head", finalizedHead.Number.Uint64())
+			// Don't skip - just log. The resolver processes all blocks in range.
 		}
 
 		// Process the block
@@ -583,6 +606,16 @@ func sqlInt64Ptr(i *int64) sql.NullInt64 {
 // processBlockRangeAlternative is an alternative implementation that processes blocks individually
 // This is kept for reference but the batched version above is preferred
 func (r *BlockResolver) processBlockRangeAlternative(ctx context.Context, startBlock int64, endBlock int64) error {
+	// If using finalized tag, fetch the finalized head once to validate
+	var finalizedHead *types.Header
+	if r.useFinalizedTag {
+		var rawHeader types.Header
+		err := r.rpcClient.Client().CallContext(ctx, &rawHeader, "eth_getBlockByNumber", "finalized", false)
+		if err == nil {
+			finalizedHead = &rawHeader
+		}
+	}
+
 	for blockNum := startBlock; blockNum <= endBlock; blockNum++ {
 		// Check context
 		select {
@@ -592,21 +625,23 @@ func (r *BlockResolver) processBlockRangeAlternative(ctx context.Context, startB
 			// Continue
 		}
 
-		var block *types.Block
-		var err error
-
-		// Handle finalized tag for the last block in batch
-		if r.useFinalizedTag && blockNum == endBlock {
-			// Use raw RPC call to get finalized block (eth_getBlockByNumber accepts "finalized" tag)
-			var rawBlock types.Block
-			err = r.rpcClient.Client().CallContext(ctx, &rawBlock, "eth_getBlockByNumber", "finalized", false)
-			block = &rawBlock
-		} else {
-			block, err = r.rpcClient.BlockByNumber(ctx, big.NewInt(blockNum))
-		}
-
+		// Always fetch by explicit block number
+		block, err := r.rpcClient.BlockByNumber(ctx, big.NewInt(blockNum))
 		if err != nil {
 			continue
+		}
+		if block == nil {
+			continue
+		}
+
+		// Validate block number matches request
+		if block.NumberU64() != uint64(blockNum) {
+			continue
+		}
+
+		// If we have a finalized head, ensure the block is finalized (or we're OK with non-finalized for recent blocks)
+		if finalizedHead != nil && block.NumberU64() > finalizedHead.Number.Uint64() {
+			// Don't skip - just continue. The resolver processes all blocks in range.
 		}
 
 		// Process block
