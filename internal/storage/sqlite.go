@@ -12,9 +12,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	_ "modernc.org/sqlite"
-	"github.com/ethereum/go-ethereum/log"
 	ethprot "github.com/ethereum/go-ethereum/eth/protocols/eth"
+	"github.com/ethereum/go-ethereum/log"
+	_ "modernc.org/sqlite"
 )
 
 // writerBatchSize is the maximum number of write operations the writer goroutine
@@ -304,7 +304,7 @@ func (s *Storage) writerLoop() {
 				return
 			}
 			batch = append(batch, req)
-drain:
+		drain:
 			for len(batch) < writerBatchSize {
 				select {
 				case r, ok := <-s.writeCh:
@@ -724,19 +724,19 @@ func (s *Storage) PersistFinalCounts(runID int64) error {
 // BatchTxObservation bundles all fields for a single transaction observation insert,
 // used by StoreTxObservations which writes a whole message's worth in one tx.
 type BatchTxObservation struct {
-	RunID             int64
+	RunID            int64
 	ObserverID       string
 	PeerID           string
 	TxHash           []byte
-	MsgType         uint64
-	TxType          uint8
-	AnnouncedSize   uint32
-	RawTx           []byte
-	IsAnnouncement  bool
-	CustodyMask     []byte
-	EthVersion      int
+	MsgType          uint64
+	TxType           uint8
+	AnnouncedSize    uint32
+	RawTx            []byte
+	IsAnnouncement   bool
+	CustodyMask      []byte
+	EthVersion       int
 	SourceConfidence string
-	PeerConnAgeMs   *int64
+	PeerConnAgeMs    *int64
 }
 
 // msgTypeToStr converts an eth message code to the message_type string.
@@ -1067,16 +1067,16 @@ func (s *Storage) GetTrackedTransactionsDueForCheck(now int64) ([]*TrackedTransa
 			usefulScorePtr = &usefulScore.Float64
 		}
 		transactions = append(transactions, &TrackedTransaction{
-			TxHash:          txHash,
-			FirstSeenNs:     firstSeenNs,
-			LastCheckedNs:   lastCheckedNs,
-			NextCheckNs:     nextCheckNs,
-			Attempt:         int(attempt),
-			Included:        included,
-			BlockNumber:     blockNumberPtr,
-			BlockHash:       blockHash,
-			TransactionIndex:transactionIndexPtr,
-			UsefulScore:     usefulScorePtr,
+			TxHash:           txHash,
+			FirstSeenNs:      firstSeenNs,
+			LastCheckedNs:    lastCheckedNs,
+			NextCheckNs:      nextCheckNs,
+			Attempt:          int(attempt),
+			Included:         included,
+			BlockNumber:      blockNumberPtr,
+			BlockHash:        blockHash,
+			TransactionIndex: transactionIndexPtr,
+			UsefulScore:      usefulScorePtr,
 		})
 	}
 	if err = rows.Err(); err != nil {
@@ -1207,4 +1207,3 @@ func (s *Storage) GetResolverCheckpoint(runID int64) (int64, error) {
 	}
 	return block.Int64, nil
 }
-

@@ -34,19 +34,19 @@ type RPCError struct {
 
 // EndpointResult holds test results for an endpoint
 type EndpointResult struct {
-	Name           string
-	URL            string
-	SustainedRate  float64 // requests per second
-	RateLimitPoint int     // consecutive successful requests before rate limiting
-	LatencyMedian  time.Duration
-	LatencyP95     time.Duration
-	ErrorRate      float64
-	BatchSupported bool
-	MaxBatchSize   int
-	SafeTagSupported bool
+	Name                  string
+	URL                   string
+	SustainedRate         float64 // requests per second
+	RateLimitPoint        int     // consecutive successful requests before rate limiting
+	LatencyMedian         time.Duration
+	LatencyP95            time.Duration
+	ErrorRate             float64
+	BatchSupported        bool
+	MaxBatchSize          int
+	SafeTagSupported      bool
 	FinalizedTagSupported bool
-	HeadLag        time.Duration
-	HashConsistency float64 // percentage of matching block hashes
+	HeadLag               time.Duration
+	HashConsistency       float64 // percentage of matching block hashes
 }
 
 // Client wraps an HTTP client for JSON-RPC calls
@@ -63,8 +63,8 @@ func NewClient(endpoint string) *Client {
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
-		endpoint:   endpoint,
-		idCounter:  0,
+		endpoint:  endpoint,
+		idCounter: 0,
 	}
 }
 
@@ -144,37 +144,37 @@ func testEndpoint(name, url string) EndpointResult {
 		if err != nil {
 			fmt.Printf("  Failed to connect: %v\n", err)
 			return EndpointResult{
-				Name:           name,
-				URL:            url,
-				SustainedRate:  0,
-				RateLimitPoint: 0,
-				LatencyMedian:  0,
-				LatencyP95:     0,
-				ErrorRate:      1.0, // 100% error rate
-				BatchSupported: false,
-				MaxBatchSize:   0,
-				SafeTagSupported: false,
+				Name:                  name,
+				URL:                   url,
+				SustainedRate:         0,
+				RateLimitPoint:        0,
+				LatencyMedian:         0,
+				LatencyP95:            0,
+				ErrorRate:             1.0, // 100% error rate
+				BatchSupported:        false,
+				MaxBatchSize:          0,
+				SafeTagSupported:      false,
 				FinalizedTagSupported: false,
-				HeadLag:        0,
-				HashConsistency: 0,
+				HeadLag:               0,
+				HashConsistency:       0,
 			}
 		}
 		if resp.Error != nil {
 			fmt.Printf("  RPC error: %v\n", resp.Error)
 			return EndpointResult{
-				Name:           name,
-				URL:            url,
-				SustainedRate:  0,
-				RateLimitPoint: 0,
-				LatencyMedian:  0,
-				LatencyP95:     0,
-				ErrorRate:      1.0,
-				BatchSupported: false,
-				MaxBatchSize:   0,
-				SafeTagSupported: false,
+				Name:                  name,
+				URL:                   url,
+				SustainedRate:         0,
+				RateLimitPoint:        0,
+				LatencyMedian:         0,
+				LatencyP95:            0,
+				ErrorRate:             1.0,
+				BatchSupported:        false,
+				MaxBatchSize:          0,
+				SafeTagSupported:      false,
 				FinalizedTagSupported: false,
-				HeadLag:        0,
-				HashConsistency: 0,
+				HeadLag:               0,
+				HashConsistency:       0,
 			}
 		}
 		latestBlock = string(resp.Result)
@@ -338,19 +338,19 @@ func testEndpoint(name, url string) EndpointResult {
 		hashConsistency := 1.0 // Assume perfect for single endpoint test
 
 		return EndpointResult{
-			Name:           name,
-			URL:            url,
-			SustainedRate:  rate,
-			RateLimitPoint: succeeded, // Simplified - actual point where rate limiting started
-			LatencyMedian:  medianLatency,
-			LatencyP95:     p95Latency,
-			ErrorRate:      errorRate,
-			BatchSupported: batchSupported,
-			MaxBatchSize:   maxBatchSize,
-			SafeTagSupported: safeTagSupported,
+			Name:                  name,
+			URL:                   url,
+			SustainedRate:         rate,
+			RateLimitPoint:        succeeded, // Simplified - actual point where rate limiting started
+			LatencyMedian:         medianLatency,
+			LatencyP95:            p95Latency,
+			ErrorRate:             errorRate,
+			BatchSupported:        batchSupported,
+			MaxBatchSize:          maxBatchSize,
+			SafeTagSupported:      safeTagSupported,
 			FinalizedTagSupported: finalizedTagSupported,
-			HeadLag:        0, // To be calculated later
-			HashConsistency: hashConsistency,
+			HeadLag:               0, // To be calculated later
+			HashConsistency:       hashConsistency,
 		}
 	}
 }

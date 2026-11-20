@@ -76,9 +76,9 @@ func TestParseNodeMalformedEntries(t *testing.T) {
 		"   ",
 		"not-a-node-id",
 		"enr:notvalidbase64!!!",
-		"enode://",            // malformed legacy URL
-		"ftp://something",     // unknown scheme
-		"enode://@@bad@host",  // garbage legacy URL
+		"enode://",           // malformed legacy URL
+		"ftp://something",    // unknown scheme
+		"enode://@@bad@host", // garbage legacy URL
 	}
 	for _, s := range malformed {
 		_, err := parseNode(s)
@@ -107,7 +107,7 @@ func TestParseNodeBareHexNodeID(t *testing.T) {
 
 // TestParseNodeDispatchCorrectParser exercises both dispatch branches.
 func TestParseNodeDispatchCorrectParser(t *testing.T) {
-	enr := params.MainnetBootnodes[0] // first entry is an ENR record
+	enr := params.MainnetBootnodes[0]    // first entry is an ENR record
 	legacy := params.MainnetBootnodes[5] // sixth entry is an enode:// URL
 
 	node, err := parseNode(enr)
@@ -173,7 +173,7 @@ func TestObserverDialRatioConfig(t *testing.T) {
 	// Verify effective dial limits
 	maxDialed := o.server.MaxDialedConns()
 	maxInbound := o.server.MaxInboundConns()
-	expectedDialed := cfg.MaxPeers / cfg.DialRatio // 50/3 = 16
+	expectedDialed := cfg.MaxPeers / cfg.DialRatio   // 50/3 = 16
 	expectedInbound := cfg.MaxPeers - expectedDialed // 50-16 = 34
 	if maxDialed != expectedDialed {
 		t.Errorf("expected MaxDialedConns=%d, got %d", expectedDialed, maxDialed)
@@ -221,7 +221,7 @@ func TestObserverDialRatioConfig(t *testing.T) {
 
 	maxDialed2 := o2.server.MaxDialedConns()
 	maxInbound2 := o2.server.MaxInboundConns()
-	expectedDialed2 := cfg2.MaxPeers / 2 // 50/2 = 25
+	expectedDialed2 := cfg2.MaxPeers / 2                // 50/2 = 25
 	expectedInbound2 := cfg2.MaxPeers - expectedDialed2 // 50-25 = 25
 	if maxDialed2 != expectedDialed2 {
 		t.Errorf("expected MaxDialedConns=%d, got %d", expectedDialed2, maxDialed2)

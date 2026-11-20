@@ -1,148 +1,249 @@
 # Ethereum Dropper Lab
 
-A reproducible research testbed for Ethereum P2P networking experiments.
+A reproducible research testbed for Ethereum P2P networking experiments. This project provides tools to observe Ethereum transaction gossip on mainnet, resolve transaction inclusion, and analyze the results.
 
-## Phase 1: Basic Docker Network
+## Components
 
-This phase sets up four lightweight Alpine containers connected via a private Docker network.
+| Command | Description |
+|---------|-------------|
+| `ethereum-dropper-observer` | Connects to Ethereum mainnet via devp2p/RLPx, observes transaction gossip (announcements, broadcasts, pooled transactions) |
+| `ethereum-dropper-resolver` | Resolves transaction inclusion by polling `eth_getTransactionByHash` with exponential backoff |
+| `ethereum-dropper-blockresolver` | Resolves transaction inclusion by fetching blocks via `eth_getBlockByNumber` (binary search on timestamps) |
+| `ethereum-dropper-analyzer` | Analyzes collected data: longitudinal studies and network-level impact analysis |
+| `ethereum-dropper-dbinspect` | Read-only SQLite database inspector for observer/resolver databases |
+| `ethereum-dropper-summarize` | Generates a human-readable summary of a collection run |
 
-### Prerequisites
-
-- Docker Engine
-- Docker Compose
-
-### Setup
-
-```bash
-# Clone repository (if not already done)
-git clone <repository-url> ethereum-dropper-lab
-cd ethereum-dropper-lab
-
-# Start the network
-./scripts/start.sh
-```
-
-### Verification
-
-After starting, you should see four containers running:
-
-```bash
-docker compose ps
-```
-
-Each container will have a static IP in the 172.30.0.0/24 subnet:
-
-- node1: 172.30.0.11
-- node2: 172.30.0.12
-- node3: 172.30.0.13
-- node4: 172.30.0.14
-
-To test connectivity from node1:
-
-```bash
-docker compose exec node1 ping -c 3 node2
-docker compose exec node1 ping -c 3 node3
-docker compose exec node1 ping -c 3 node4
-```
-
-You can also inspect network configuration inside a container:
-
-```bash
-docker compose exec node1 ip addr
-docker compose exec node1 ip route
-```
-
-### Management Scripts
-
-- `./scripts/start.sh` - Start the testbed
-- `./scripts/stop.sh` - Stop the testbed
-- `./scripts/reset.sh` - Stop and remove containers, networks, and volumes
-
-### Next Steps
-
-After verifying basic connectivity, proceed to Phase 2 to replace Alpine containers with Ethereum execution clients.
-
----
-
-## Phase 2: Private Ethereum Network with Peer Connections
-
-This phase replaces the Alpine containers with Ethereum execution clients (Geth v1.17.5) to create a private Ethereum development network.
+## Quick Start
 
 ### Prerequisites
 
-- Docker Engine
-- Docker Compose
-- Completed Phase 1
+- Go 1.21+
+- Access to an Ethereum JSON-RPC endpoint (for resolver/blockresolver)
 
-### Genesis Configuration
-
-The network uses a custom genesis file (`configs/genesis/genesis.json`) with:
-- Chain ID: 1337
-- Difficulty: 0x20000
-- Gas Limit: 0x2fefd8
-- Pre-funded accounts:
-  - 0x0000000000000000000000000000000000000000 (large balance)
-  - 0xAbac9F99A31345dB7f388e6873E1CAFC25A2B8dc
-  - 0xC210ab0eCD61F2566365b9DfaC53AF2d47373c90
-  - 0xc5B66bbD749280E03060E83c95c1bbCC5A6205F1
-  - 0xe1E2530C046Fecc728A4d36905A5a7ff41F936E7
-
-### Setup
+### Build
 
 ```bash
-# Start the Ethereum network
-./scripts/start.sh
-
-# Verify peer connections (run after nodes are fully started)
-./scripts/healthcheck.sh
+go build -o observer ./cmd/observer
+go build -o resolver ./cmd/resolver
+go build -o blockresolver ./cmd/blockresolver
+go build -o analyzer ./cmd/analyzer
+go build -o dbinspect ./cmd/dbinspect
+go build -o summarize ./cmd/summarize
 ```
 
-### Verification
-
-After starting, you should see four Geth containers running:
+### Run the Observer
 
 ```bash
-docker compose ps
+# Using defaults (mainnet, passive mode, port 30306)
+./observer
+
+# With config file
+./observer --config configs/mainnet_observer.json
+
+# Override data label and mode
+./observer --label "MY_EXPERIMENT" --mode fetch
 ```
 
-Each container exposes:
-- P2P port: 30303
-- RPC port: 8545
-- WS port: 8546
-- IPC: /data/geth.ipc (inside container)
-
-To check peer connections from any node:
+### Run the Resolver
 
 ```bash
-# Check peer count
-docker compose exec node1 geth attach --exec "net.peerCount" ipc:/data/geth.ipc
+# Resolve transactions from observer.db using RPC endpoint
+./resolver --rpc-endpoint https://eth-mainnet.example.com
 
-# Check detailed peers list
-docker compose exec node1 geth attach --exec "admin.peers" ipc:/data/geth.ipc
-
-# Run healthcheck for comprehensive metrics
-./scripts/healthcheck.sh
+# With config file and custom settings
+./resolver --config configs/mainnet_observer.json --rpc-endpoint https://eth-mainnet.example.com --max-attempts 10 --base-delay 2
 ```
 
-### Management Scripts
+### Run the Block Resolver
 
-- `./scripts/start.sh` - Start the Ethereum testbed
-- `./scripts/stop.sh` - Stop the Ethereum testbed
-- `./scripts/reset.sh` - Stop and remove containers, networks, and volumes
-- `./scripts/healthcheck.sh` - Collect peer metrics and store in results/
+```bash
+# Binary-search blocks by timestamp, fetch via eth_getBlockByNumber
+./blockresolver --rpc-endpoint https://eth-mainnet.example.com --post-run-margin 3600 --batch-size 50
+```
 
-### Peer Connection Status (as of last healthcheck)
+### Analyze Results
 
-Based on the latest healthcheck run:
-- node1: 3 peers (connected to node2, node3, node4)
-- node2: 3 peers (connected to node1, node3, node4)
-- node3: Connected to node1 and node2
-- node4: Connected to node1 and node2
+```bash
+# Longitudinal (time-series) analysis
+./analyzer --db observer.db --longitudinal --output longitudinal.csv
 
-All nodes are successfully interconnected forming a partial mesh network.
+# Network impact analysis (peer spread, timing)
+./analyzer --db observer.db --impact --output impact.csv
 
-### Next Steps
+# Both analyses
+./analyzer --db observer.db
+```
 
-After verifying peer connectivity, proceed to Phase 3 to test transaction propagation between nodes.
+### Inspect Database
 
----
+```bash
+# Full summary of latest run
+./dbinspect --db observer.db
+
+# Schema only
+./dbinspect --db observer.db --schema
+
+# Table counts only
+./dbinspect --db observer.db --tables
+
+# Specific run
+./dbinspect --db observer.db --run 5
+```
+
+### Generate Human-Readable Summary
+
+```bash
+# Summary of latest run
+./summarize --db observer.db
+
+# Specific run
+./summarize --db observer.db --run 5
+
+# Output to file
+./summarize --db observer.db --output summary.txt
+```
+
+## Configuration
+
+The observer uses a JSON configuration file. All fields are optional; defaults are provided by `MainnetConfig()`.
+
+### Network Settings
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `listen_addr` | string | `":30306"` | Local address for P2P listener (non-standard to avoid stale process conflicts) |
+| `max_peers` | int | `50` | Maximum number of concurrent peers |
+| `bootnodes` | []string | Mainnet bootnodes | ENR/ENODE URLs for initial peer discovery |
+| `static_nodes` | []string | `[]` | Static peer ENODEs (bypasses discovery) |
+| `nat` | string | `""` | NAT traversal mode: `"any"`, `"extip:<IP>"`, `"none"` |
+| `no_discovery` | bool | `false` | Disable peer discovery (use only static nodes) |
+| `dial_timeout` | duration | `5s` | Timeout for outbound dial attempts |
+| `dial_ratio` | int | `2` | Dial every N peers (1 = dial all, 2 = 50% inbound) |
+
+### Collection Settings
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `mode` | string | `"passive"` | Collection mode: `"passive"` (listen only) or `"fetch"` (request pooled transactions) |
+| `data_label` | string | `"MAINNET_OBSERVATION"` | Provenance label stored in `collection_runs` |
+| `storage_path` | string | `"observer.db"` | SQLite database file path |
+| `tx_dissemination_enabled` | bool | `false` | Enable transaction dissemination (relay to peers) |
+| `tx_dissemination_rate_limit` | int | `10` | Max transactions relayed per second |
+
+### Run Metadata (stored in `collection_runs`)
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `observer_id` | string | `"observer-001"` | Unique identifier for this observer instance |
+| `geth_lib_version` | string | `"go-ethereum/v1.17.5"` | go-ethereum library version |
+| `go_build_version` | string | `"go1.26.5"` | Go compiler version |
+| `collector_git_commit` | string | `""` | Git commit hash of the collector build |
+| `config_hash` | string | `""` | Hash of the configuration used |
+| `schema_version` | string | `"1"` | Database schema version |
+| `notes` | string | `""` | Free-form notes |
+
+### Resolver Settings
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `rpc_endpoint` | string | `""` | JSON-RPC endpoint for `eth_getTransactionByHash` / `eth_getBlockByNumber` |
+| `max_attempts` | int | `5` | Maximum attempts per transaction |
+| `base_delay` | duration | `1s` | Base delay for exponential backoff |
+| `status_rpc_endpoint` | string | `""` | RPC endpoint for `eth_getBlockByNumber` (ForkID handshake) |
+| `status_rpc_timeout` | duration | `10s` | Timeout for status RPC calls |
+| `post_run_margin` | int | `3600` | Seconds to wait after observation end before resolving |
+| `batch_size` | int | `20` | Blocks per batch RPC request (blockresolver) |
+| `max_concurrent_requests` | int | `5` | Max concurrent RPC requests (blockresolver) |
+
+### Logging
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `log_level` | string | `"info"` | Log level: `trace`, `debug`, `info`, `warn`, `error`, `crit` |
+
+## Command-Line Flags
+
+### Observer (`ethereum-dropper-observer`)
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--config` | string | `""` | Path to configuration file |
+| `--label` | string | `"MAINNET_OBSERVATION"` | Data label for provenance |
+| `--mode` | string | `"passive"` | Collection mode: passive or fetch |
+
+### Resolver (`ethereum-dropper-resolver`)
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--config` | string | `""` | Path to configuration file |
+| `--label` | string | `"MAINNET_OBSERVATION"` | Data label for provenance |
+| `--mode` | string | `"passive"` | Collection mode: passive or fetch |
+| `--rpc-endpoint` | string | `""` | JSON-RPC endpoint for eth_getTransactionByHash |
+| `--max-attempts` | int | `5` | Maximum attempts to check a transaction |
+| `--base-delay` | int | `1` | Base delay in seconds for exponential backoff |
+
+### Block Resolver (`ethereum-dropper-blockresolver`)
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--config` | string | `""` | Path to configuration file |
+| `--label` | string | `"MAINNET_OBSERVATION"` | Data label for provenance |
+| `--mode` | string | `"passive"` | Collection mode: passive or fetch |
+| `--rpc-endpoint` | string | `""` | JSON-RPC endpoint for eth_getBlockByNumber |
+| `--post-run-margin` | int | `3600` | Post-run margin in seconds |
+| `--batch-size` | int | `20` | Number of blocks per RPC batch |
+| `--max-concurrent-requests` | int | `5` | Maximum concurrent block fetching requests |
+
+### Analyzer (`ethereum-dropper-analyzer`)
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--config` | string | `""` | Path to configuration file |
+| `--db` | string | `""` | Path to SQLite database (overrides config) |
+| `--run` | string | `""` | Collection run ID (default: latest) |
+| `--output` | string | `""` | Output file (default: stdout) |
+| `--longitudinal` | bool | `false` | Run longitudinal study analysis |
+| `--impact` | bool | `false` | Run network-level impact analysis |
+
+### DB Inspector (`ethereum-dropper-dbinspect`)
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--db` | string | *required* | Path to SQLite database file |
+| `--run` | string | `""` | Collection run ID (default: latest) |
+| `--tables` | bool | `false` | List tables and row counts only |
+| `--schema` | bool | `false` | Print CREATE TABLE schema |
+| `--output` | string | `""` | Output file (default: stdout) |
+
+### Summarize (`ethereum-dropper-summarize`)
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--db` | string | *required* | Path to SQLite database file |
+| `--run` | string | `""` | Collection run ID (default: latest) |
+| `--output` | string | `""` | Output file (default: stdout) |
+
+## Database Schema
+
+The observer uses SQLite with WAL mode. Tables:
+
+- `collection_runs` — Metadata for each collection run (git commit, config hash, schema version, mode, data label, timestamps)
+- `peer_events` — Peer connection/disconnection/handshake events with timestamps
+- `transaction_observations` — Raw transaction gossip observations (tx_hash, peer_id, message_type, timestamp, message size, etc.)
+- `tracked_transactions` — Deduplicated transactions with inclusion status (NULL=unknown, 0=not included, 1=included)
+- `transaction_inclusion` — Append-only inclusion results keyed by (tx_hash, resolve_run_id)
+- `resolver_runs` — Metadata for each resolver run
+
+## Go Commands
+
+| Command | Description |
+|---------|-------------|
+| `go build ./...` | Build all packages |
+| `go test -short ./...` | Run unit tests (skips e2e/network tests) |
+| `go vet ./internal/... ./cmd/...` | Static analysis |
+| `gofmt -l .` | List files needing formatting |
+| `gofmt -w .` | Format all files |
+
+## License
+
+MIT

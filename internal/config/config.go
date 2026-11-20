@@ -33,34 +33,34 @@ type Config struct {
 	DialTimeout              time.Duration `json:"dial_timeout"`
 	TxDisseminationEnabled   bool          `json:"tx_dissemination_enabled"`
 	TxDisseminationRateLimit int           `json:"tx_dissemination_rate_limit"` // per second
-	DialRatio              int           `json:"dial_ratio"`                // dial every N peers (default 1 = dial all)
+	DialRatio                int           `json:"dial_ratio"`                  // dial every N peers (default 1 = dial all)
 
 	// Run metadata (for collection_runs row + append-only inclusion labeling)
-	ObserverID       string `json:"observer_id"`
-	GethLibVersion   string `json:"geth_lib_version"`
-	GoBuildVersion   string `json:"go_build_version"`
+	ObserverID         string `json:"observer_id"`
+	GethLibVersion     string `json:"geth_lib_version"`
+	GoBuildVersion     string `json:"go_build_version"`
 	CollectorGitCommit string `json:"collector_git_commit"`
-	ConfigHash       string `json:"config_hash"`
-	SchemaVersion    string `json:"schema_version"`
-	Notes            string `json:"notes"`
+	ConfigHash         string `json:"config_hash"`
+	SchemaVersion      string `json:"schema_version"`
+	Notes              string `json:"notes"`
 
 	// Resolver settings (optional, used by the resolver tool)
-	ResolverRPCEndpoint   string        `json:"rpc_endpoint"`
-	ResolverMaxAttempts   int           `json:"max_attempts"`
+	ResolverRPCEndpoint string `json:"rpc_endpoint"`
+	ResolverMaxAttempts int    `json:"max_attempts"`
 
 	// RPC endpoint used to fetch the live head block for computing the eth
 	// Status handshake ForkID (Point 1: labelled EXTERNAL when logged).
-	StatusRPCEndpoint  string        `json:"status_rpc_endpoint"`
-	StatusRPCTimeout   time.Duration `json:"status_rpc_timeout"` // default 10s
+	StatusRPCEndpoint string        `json:"status_rpc_endpoint"`
+	StatusRPCTimeout  time.Duration `json:"status_rpc_timeout"` // default 10s
 
 	// Log level for the observer ("trace", "debug", "info", "warn", "error", "crit").
 	// Defaults to "info". At "debug", go-ethereum's root logger is set to debug so
 	// dial and handshake errors appear.
-	LogLevel string `json:"log_level"`
-	ResolverBaseDelay     time.Duration `json:"base_delay"` // in seconds
-	ResolverPostRunMargin int           `json:"post_run_margin"` // in seconds
-	ResolverBatchSize     int           `json:"batch_size"`
-	ResolverMaxConcurrentRequests int     `json:"max_concurrent_requests"`
+	LogLevel                      string        `json:"log_level"`
+	ResolverBaseDelay             time.Duration `json:"base_delay"`      // in seconds
+	ResolverPostRunMargin         int           `json:"post_run_margin"` // in seconds
+	ResolverBatchSize             int           `json:"batch_size"`
+	ResolverMaxConcurrentRequests int           `json:"max_concurrent_requests"`
 }
 
 // MainnetConfig returns the default mainnet configuration
@@ -77,24 +77,24 @@ func MainnetConfig() *Config {
 		DialTimeout:              5 * time.Second,
 		TxDisseminationEnabled:   false,
 		TxDisseminationRateLimit: 10, // 10 per second by default
-		DialRatio:              2,  // dial every 2 peers (50% inbound) — ratio 1 allows zero inbound
+		DialRatio:                2,  // dial every 2 peers (50% inbound) — ratio 1 allows zero inbound
 
 		// Run metadata defaults
-		ObserverID:       "observer-001",
-		GethLibVersion:   "go-ethereum/v1.17.5",
-		GoBuildVersion:   "go1.26.5",
+		ObserverID:         "observer-001",
+		GethLibVersion:     "go-ethereum/v1.17.5",
+		GoBuildVersion:     "go1.26.5",
 		CollectorGitCommit: "",
-		ConfigHash:       "",
-		SchemaVersion:    "1",
-		Notes:            "",
-		LogLevel:         "info",
+		ConfigHash:         "",
+		SchemaVersion:      "1",
+		Notes:              "",
+		LogLevel:           "info",
 
 		// Resolver settings
-		ResolverRPCEndpoint:   "", // empty means not set; resolver tool will require it to be set via config or flag
-		ResolverMaxAttempts:   5,
-		ResolverBaseDelay:     1 * time.Second, // 1 second base delay
-		ResolverPostRunMargin: 3600, // 1 hour in seconds
-		ResolverBatchSize:     20,
+		ResolverRPCEndpoint:           "", // empty means not set; resolver tool will require it to be set via config or flag
+		ResolverMaxAttempts:           5,
+		ResolverBaseDelay:             1 * time.Second, // 1 second base delay
+		ResolverPostRunMargin:         3600,            // 1 hour in seconds
+		ResolverBatchSize:             20,
 		ResolverMaxConcurrentRequests: 5,
 	}
 }

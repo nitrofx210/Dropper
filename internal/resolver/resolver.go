@@ -13,15 +13,15 @@ import (
 
 // Resolver checks transaction inclusion on-chain with backoff strategy.
 type Resolver struct {
-	storage      *storage.Storage
-	rpcClient    *ethclient.Client
-	maxAttempts  int
-	baseDelay    time.Duration
+	storage     *storage.Storage
+	rpcClient   *ethclient.Client
+	maxAttempts int
+	baseDelay   time.Duration
 }
 
 // Errors
 var (
-	ErrEmptyRPCEndpoint   = fmt.Errorf("rpc endpoint is empty")
+	ErrEmptyRPCEndpoint = fmt.Errorf("rpc endpoint is empty")
 )
 
 // NewResolver creates a new Resolver instance.
@@ -35,8 +35,8 @@ func NewResolver(sto *storage.Storage, rpcEndpoint string, maxAttempts int, base
 		return nil, err
 	}
 	return &Resolver{
-		storage:   sto,
-		rpcClient: client,
+		storage:     sto,
+		rpcClient:   client,
 		maxAttempts: maxAttempts,
 		baseDelay:   baseDelay,
 	}, nil

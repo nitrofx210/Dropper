@@ -27,9 +27,9 @@ func TestPeerEventDisconnectWrittenOnce(t *testing.T) {
 	defer removeDB(dbPath)
 
 	cfg := &config.Config{
-		ObserverID: "obs-1",
+		ObserverID:  "obs-1",
 		StoragePath: dbPath,
-		Mode: "passive",
+		Mode:        "passive",
 	}
 
 	runID, err := sto.StartCollectionRun(&storage.CollectionRun{

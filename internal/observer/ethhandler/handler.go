@@ -11,9 +11,9 @@ import (
 	"github.com/ethereum/go-ethereum/core/forkid"
 	"github.com/ethereum/go-ethereum/core/types"
 	ethprot "github.com/ethereum/go-ethereum/eth/protocols/eth"
-	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/p2p"
+	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rlp"
 
@@ -58,11 +58,11 @@ func (r *rateLimiter) take() bool {
 
 // EthHandler handles eth protocol messages (eth/69-72)
 type EthHandler struct {
-	storage              *storage.Storage
-	runID                int64
-	observerID           string
-	fetchMode            bool
-	txDisseminationEnabled bool
+	storage                 *storage.Storage
+	runID                   int64
+	observerID              string
+	fetchMode               bool
+	txDisseminationEnabled  bool
 	txReannounceRateLimiter *rateLimiter
 
 	// Chain metadata used for the eth Status handshake.
@@ -99,15 +99,15 @@ func (h *EthHandler) SetPeerDirCallback(cb func(enode.ID, bool)) {
 // New creates a new EthHandler
 func New(sto *storage.Storage, runID int64, observerID string, fetchMode bool, disseminationEnabled bool, disseminationRateLimit int) *EthHandler {
 	return &EthHandler{
-		storage:              sto,
-		runID:                runID,
-		observerID:           observerID,
-		fetchMode:            fetchMode,
-		txDisseminationEnabled: disseminationEnabled,
+		storage:                 sto,
+		runID:                   runID,
+		observerID:              observerID,
+		fetchMode:               fetchMode,
+		txDisseminationEnabled:  disseminationEnabled,
 		txReannounceRateLimiter: newRateLimiter(float64(disseminationRateLimit)),
-		decodeFailures:         make(map[uint64]uint64),
-		lastDecodeLog:          time.Now(),
-		peerHandshakeNs:        make(map[string]int64),
+		decodeFailures:          make(map[uint64]uint64),
+		lastDecodeLog:           time.Now(),
+		peerHandshakeNs:         make(map[string]int64),
 	}
 }
 
@@ -765,6 +765,7 @@ func ethMessageName(msgCode uint64) string {
 		return fmt.Sprintf("code_%d", msgCode)
 	}
 }
+
 // handleGetBlockHeaders responds to GetBlockHeaders (0x03) with an empty
 // BlockHeaders sheet packet echoing RequestId. Observer sends a valid empty
 // response rather than ignoring the request so peers don't stall waiting.
@@ -812,7 +813,6 @@ func (h *EthHandler) handleGetReceipts(p *p2p.Peer, msg p2p.Msg, rw p2p.MsgReadW
 	}
 	return nil
 }
-
 
 // handleGetBlockAccessLists responds to GetBlockAccessLists (0x12) with an
 // empty BlockAccessListPacket echoing RequestId. Observer sends a valid empty

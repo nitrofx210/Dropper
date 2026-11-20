@@ -155,11 +155,13 @@ func TestDecodeFailureDoesNotKillConnection(t *testing.T) {
 		err error
 	}
 	ch := make(chan sendResult, 1)
-	go func() { ch <- sendResult{err: p2p.Send(rwA, ethprot.NewPooledTransactionHashesMsg, &ethprot.NewPooledTransactionHashesPacket72{
-		Hashes: []common.Hash{txHash},
-		Types:  []uint8{0},
-		Sizes:  []uint32{0},
-	})} }()
+	go func() {
+		ch <- sendResult{err: p2p.Send(rwA, ethprot.NewPooledTransactionHashesMsg, &ethprot.NewPooledTransactionHashesPacket72{
+			Hashes: []common.Hash{txHash},
+			Types:  []uint8{0},
+			Sizes:  []uint32{0},
+		})}
+	}()
 
 	msg, err := rwB.ReadMsg()
 	if err != nil {
@@ -368,9 +370,12 @@ func TestE2EAnnouncementsBroadcastsPooledResponse(t *testing.T) {
 	rwC, rwD := p2p.MsgPipe()
 	rwE, rwF := p2p.MsgPipe()
 	defer func() {
-		_ = rwA.Close(); _ = rwB.Close()
-		_ = rwC.Close(); _ = rwD.Close()
-		_ = rwE.Close(); _ = rwF.Close()
+		_ = rwA.Close()
+		_ = rwB.Close()
+		_ = rwC.Close()
+		_ = rwD.Close()
+		_ = rwE.Close()
+		_ = rwF.Close()
 	}()
 
 	peerA := p2p.NewPeerPipe(testPeerID(1), "peerA", nil, rwA)
