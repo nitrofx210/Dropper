@@ -1,0 +1,29 @@
+{
+    "message":  "Chain head at block 26269759, age 0.2 min",
+    "head_age_minutes":  0.2,
+    "now_unix_seconds":  1792932116,
+    "head_block_timestamp":  1792932107,
+    "rpc_endpoint":  "https://eth.drpc.org",
+    "head_block_number":  26269759,
+    "db_path":  "mainnet_2026-10-23.db",
+    "status":  "rpc_ok",
+    "timestamp":  "2026-10-25T18:11:55.8470476+05:30"
+}
+{
+    "status":  "db_missing",
+    "timestamp":  "2026-10-25T18:11:55.9126434+05:30",
+    "message":  "Database file not found: mainnet_2026-10-23.db",
+    "rpc_endpoint":  "https://eth.drpc.org",
+    "db_path":  "mainnet_2026-10-23.db"
+}
+{
+    "message":  "No collection runs found in local DB yet",
+    "head_age_minutes":  0.2,
+    "now_unix_seconds":  1792932116,
+    "head_block_timestamp":  1792932107,
+    "rpc_endpoint":  "https://eth.drpc.org",
+    "head_block_number":  26269759,
+    "db_path":  "mainnet_2026-10-23.db",
+    "status":  "no_local_run",
+    "timestamp":  "2026-10-25T18:11:55.9126434+05:30"
+}

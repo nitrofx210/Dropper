@@ -9,6 +9,11 @@
 *.db-shm
 *.db-wal
 
+# Exception: sample database for code review
+!docs/sample/observer_sample.db
+!docs/sample/observer_sample.db-shm
+!docs/sample/observer_sample.db-wal
+
 # Logs
 *.log
 out.log
@@ -17,7 +22,6 @@ out.log
 nodes/
 
 # Scripts
-scripts/
 scripts_backup/
 
 # Validation test
@@ -41,6 +45,19 @@ observer_stage*.log
 observer_stage*.db*
 resolver.exe~
 insert_test_data
+
+# Sensitive files (never commit)
+password.txt
+password.sec
+accounts/
+*.csv
+*_test.db
+
+# Test binaries
+*_test
+
+# Compiled binaries
+/bin/
 
 # Upstream clones are tracked separately — do not commit them here.
 go-ethereum/
